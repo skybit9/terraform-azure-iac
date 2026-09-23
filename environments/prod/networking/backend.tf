@@ -1,6 +1,8 @@
-# Backend values are supplied at init time by the pipeline via -backend-config.
-# State for prod/networking lives in the MANAGEMENT subscription, in the
-# prod storage account, in the tfstate-networking container.
+# Values supplied at init by the pipeline via -backend-config:
+#   storage account : tfstateprod001 (management subscription)
+#   container       : tfstate-networking
+#   key             : terraform.tfstate
+#   use_azuread_auth: true (shared key access is disabled on the account)
 terraform {
   backend "azurerm" {}
 }

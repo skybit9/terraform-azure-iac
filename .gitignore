@@ -1,33 +1,35 @@
-# Terraform state: contains secrets in plaintext. Never commit.
+# Terraform state: contains secrets in plaintext (including generated SSH keys)
 *.tfstate
 *.tfstate.*
-*.tfstate.backup
 
-# Provider binaries and lock dir
+# Provider and module cache
 .terraform/
-.terraform.lock.hcl
 
-# tfvars in this repo hold no secrets (names, sizes, CIDRs, tags) and ARE
-# committed so each stack is reproducible. Secrets come from Key Vault or
-# remote state at runtime. Keep any local override file out:
+# NOTE: .terraform.lock.hcl is deliberately NOT ignored. Commit it, so every
+# run and every engineer uses the exact provider builds that were reviewed.
+
+# Saved plans and pipeline outputs
+*.binary
+tfplan.*
+apply.*
+applied-plan.txt
+drift.txt
+checkov.xml
+
+# Local overrides only. The committed terraform.tfvars files hold no secrets.
 *.auto.tfvars
 *.local.tfvars
+override.tf
+override.tf.json
+*_override.tf
 
-# Saved plans
-*.tfplan
-*.binary
-plan-*.json
-plan-*.txt
-apply-*.txt
+# Bootstrap output: app IDs and service principal object IDs
+bootstrap/identities.env
 
-# Crash logs
+# Tooling
+.venv/
 crash.log
 crash.*.log
-
-# Editor / OS
-.vscode/
-.idea/
 .DS_Store
-
-# Bootstrap output: contains app IDs and SP object IDs
-bootstrap/identities.env
+.idea/
+.vscode/

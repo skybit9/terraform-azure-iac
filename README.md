@@ -1,116 +1,131 @@
 # terraform-azure-iac
 
 Reference implementation for converting manually provisioned Azure
-infrastructure into governed, modular, pipeline-deployed Terraform.
+infrastructure into governed, modular, pipeline-deployed Terraform on Azure
+DevOps.
+
+## Layout
+
+```
+modules/linux-vm/          reusable module, consumed by git tag
+environments/<env>/<stack> one root module per environment and stack
+pipelines/                 CI (plan), CD (apply), nightly drift detection
+bootstrap/                 one-time Azure and Azure DevOps prerequisites
+.checkov.yaml              policy scan config with every exception justified
+.tflint.hcl                lint rules
+```
 
 ## State topology
 
 ```
 MANAGEMENT SUBSCRIPTION
 └── rg-terraform-state
-    ├── tfstatedev001
-    │   ├── tfstate-networking   -> terraform.tfstate
-    │   ├── tfstate-keyvault     -> terraform.tfstate
-    │   └── tfstate-app          -> terraform.tfstate
-    ├── tfstatestaging001  (same three containers)
-    └── tfstateprod001     (same three containers)
+    ├── tfstatedev001       tfstate-networking | tfstate-keyvault | tfstate-app
+    ├── tfstatestaging001   same three containers
+    └── tfstateprod001      same three containers
 ```
 
-**State lives outside the subscription it describes.** If a workload
-subscription is deleted, disabled, or moved between tenants, the state
-describing it would die with it and every resource would need re-importing by
-hand. The management subscription removes that dependency.
-
-**One container per stack, not one container with many blob keys.** A container
-is an RBAC scope; a blob key is not. Scoping `Storage Blob Data Contributor` at
-the container means the app pipeline identity cannot read networking state. With
-one shared container, any identity with data access reads every state file in it.
-
-**One storage account per environment.** State cannot cross an environment
-boundary by accident, even through a misconfigured backend block.
+- **State lives outside the subscriptions it describes.** Deleting or moving a
+  workload subscription must not destroy the state that manages it.
+- **One container per stack.** A container is an RBAC scope; a blob key is not.
+  Each stack's identities can reach only their own container.
+- **Shared key access is disabled** on every state account, so the backend
+  authenticates with Entra ID (`use_azuread_auth = true`).
 
 ## Stacks
 
-Each stack is one resource group, one container, one state file, and its own
-pipeline identities.
-
-| Stack | Resource group | Owns | Consumed by |
+| Stack | Resource group | Contains | Read by |
 |---|---|---|---|
-| `networking` | `rg-networking-<env>` | VNet, subnets | keyvault, app |
-| `keyvault` | `rg-keyvault-<env>` | Key Vault | app |
-| `app` | `rg-app-<env>` | Linux VM via module | - |
+| `networking` | `rg-networking-<env>` | VNet, subnet, subnet NSG | app |
+| `keyvault` | `rg-keyvault-<env>` | Key Vault (RBAC mode) | app |
+| `app` | `rg-app-<env>` | VMs from `modules/linux-vm` | |
 
-The app stack reads upstream outputs through `terraform_remote_state`, so CD
-applies networking, then keyvault, then app. That order is not optional.
+The app stack reads the others through `terraform_remote_state`, so **apply
+order is networking, keyvault, app**. On a brand new environment the first CI
+plan of the app stack fails until networking and keyvault have been applied
+once; that is expected.
+
+## Adding or removing a VM
+
+VMs are a map in `environments/<env>/app/terraform.tfvars`:
+
+```hcl
+vms = {
+  "vm-app-dev-01" = { vm_size = "Standard_B2s", os_disk_size_gb = 64, os_disk_type = "StandardSSD_LRS" }
+  "vm-app-dev-02" = { vm_size = "Standard_B2s", os_disk_size_gb = 64, os_disk_type = "StandardSSD_LRS" }
+}
+```
+
+The module is called once with `for_each`, keyed by VM name. Removing an entry
+destroys only that VM; the others are never in the plan.
+
+## Module versioning
+
+Stacks consume the module by git tag:
+
+```hcl
+source = "git::https://github.com/skybit9/terraform-azure-iac.git//modules/linux-vm?ref=v1.0.0"
+```
+
+To release a module change: merge it, tag `v1.1.0`, bump `?ref=` in **dev**
+only, let it run, then staging, then prod. Run `terraform init -upgrade` after
+changing a ref. **Protect release tags** so a tag cannot be moved; a movable
+tag is a moving target.
 
 ## Identities
 
-18 service principals: 3 environments x 3 stacks x {plan, apply}.
+18 service principals: 3 environments x 3 stacks x {plan, apply}. No client
+secrets: authentication is workload identity federation.
 
-| Kind | Azure scope | State scope |
+- `plan` holds **Reader**. CI runs on every pull request, so a PR that adds an
+  apply step to the YAML still cannot change Azure.
+- `apply` holds **Contributor** on its own resource group only.
+
+Every grant and its reason: `bootstrap/README.md`.
+
+## Pipelines
+
+| Pipeline | Trigger | Does |
 |---|---|---|
-| `plan` | Reader on the stack's resource group | Blob Data Contributor on its own container |
-| `apply` | Contributor on the stack's resource group | Blob Data Contributor on its own container |
+| `ci-plan.yml` | PR into `main` | fmt, validate, tflint, then plan + Checkov for all 9 stacks in parallel. Never applies |
+| `cd-apply.yml` | merge to `main` | per environment: **one approval**, then networking, keyvault, app in order. Fresh plan inside the gate, then applies exactly that saved plan |
+| `drift-detection.yml` | nightly | read-only plan of prod stacks; exit code 2 fails the run |
 
-Plan and apply are separate because CI runs on every pull request. A plan needs
-Reader only, so a PR that adds an apply step to the YAML still cannot change
-Azure.
+CD re-plans rather than replaying the PR's plan artifact, so a PR merged in
+between cannot cause a stale plan to be applied. Branch policy requires the
+branch to be up to date with `main` before merge.
 
-The app identities additionally hold **Blob Data Reader** on the networking and
-keyvault containers, granted per container rather than at the account, so the
-isolation above survives.
+## Policy scanning
 
-No client secrets anywhere. Authentication is **workload identity federation**:
-the app registration trusts an OIDC token issued by Azure DevOps for one
-specific org, project, and service connection.
+Checkov scans the **resolved plan JSON** in CI, not only raw HCL, so values
+from variables, locals, and module outputs are evaluated. Open source Checkov
+has no severities without a Prisma Cloud API key, so this repo **fails on every
+finding** and lists each accepted exception, with its reason, in
+`.checkov.yaml`. Adding an exception therefore requires a reviewed PR.
 
-## Branch strategy
+Azure Policy `Deny` assignments at management group level are the backstop:
+they apply regardless of origin, pipeline, portal, CLI, or SDK.
 
-| Branch | Trigger | Pipeline |
+## Known limits and hardening path
+
+| Limit | Why | Hardening |
 |---|---|---|
-| `feature/*` | PR into `main` | `ci-plan.yml`: fmt, validate, tflint, Checkov, plan. Never applies |
-| `main` | Merge | `cd-apply.yml`: fresh plan, then apply behind Environment approval gates |
+| Key Vault public endpoint reachable | Microsoft hosted agents write the SSH secrets from outside the VNet | Private endpoint + self hosted agent in the VNet, then `public_network_access_enabled = false` |
+| Generated SSH private key is in state | `tls_private_key` stores it there, in plaintext | Generate keys outside Terraform and pass only the public key |
+| Module pinned by tag, not commit SHA | Readable promotion | Tag protection, or pin SHAs |
 
-CD re-plans inside the approval gate rather than replaying the PR artifact, so a
-PR merged in between cannot cause a stale plan to be applied. Branch policy
-requires branches to be up to date with `main` before merge.
+## Verification performed on this revision
 
-## Bootstrap
+| Check | Tool | Result |
+|---|---|---|
+| Formatting and HCL syntax, all files | OpenTofu `fmt -check` | clean |
+| Resource argument names | checked against azurerm **4.81.0** provider source | all present |
+| Module inputs, tfvars, remote state outputs, version pins | custom cross-reference check | pass |
+| Security policy | Checkov 3.3 | 47 passed, 0 failed |
+| Bootstrap scripts | shellcheck, `bash -n` | clean |
+| Pipelines | yamllint strict + simulated template expansion | clean |
 
-Azure-side prerequisites must exist before either pipeline runs.
-
-```bash
-cd bootstrap
-source ./00-variables.sh     # edit values first
-./01-state-backend.sh        # storage accounts and containers
-./02-identities.sh           # 18 service principals
-source ./identities.env
-./03-rbac.sh                 # container-scoped and RG-scoped RBAC
-# create the service connections in Azure DevOps, then:
-./04-federated-credentials.sh
-./05-providers.sh
-./99-verify.sh
-```
-
-Service connection names must match `SVC-TF-<env>-<stack>-<plan|apply>`.
-
-## Bringing existing infrastructure under management
-
-1. Bootstrap the state backend outside the Terraform it serves
-2. Inventory the subscription, exclude `MC_*`, `NetworkWatcherRG`, `DefaultResourceGroup-*`
-3. Export one resource group at a time with `aztfexport`, or use `import` blocks
-4. Reconcile until `terraform plan` returns **No changes**
-5. Refactor into modules using `moved` blocks so nothing is destroyed
-6. Wire into CI and CD, enable nightly drift detection
-7. Remove Contributor from humans so the pipeline is the only write path
-
-## Security notes
-
-- State contains secrets in plaintext. Storage accounts disable public blob
-  access, disable shared key access (forcing Entra auth), enforce TLS 1.2, and
-  enable versioning plus soft delete as the recovery path.
-- `.gitignore` excludes `*.tfstate`, saved plans, and `bootstrap/identities.env`.
-- Checkov scans the resolved plan JSON, not raw HCL, so values from variables,
-  locals, and module outputs are evaluated.
-- Azure Policy `Deny` effects at management group level are the backstop and
-  apply regardless of origin: pipeline, portal, CLI, or SDK.
+Not verifiable without Azure credentials and provider downloads: `terraform
+validate` against the real provider schema, and a live plan. Run
+`terraform init -backend=false && terraform validate` in each stack, which the
+CI Validate stage does on every PR.

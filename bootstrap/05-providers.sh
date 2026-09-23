@@ -1,46 +1,36 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════════════
-# 05 — RESOURCE PROVIDER REGISTRATION
-#
-# An unregistered provider fails at APPLY time with "MissingSubscription
-# Registration", which reads like a permissions problem and wastes time.
-# Register up front, per subscription. Registration is idempotent.
+# 05: RESOURCE PROVIDER REGISTRATION
+# The stacks set resource_provider_registrations = "none", because azurerm 4.x
+# otherwise tries to register providers at subscription scope and RG-scoped
+# pipeline identities cannot. Registration happens here instead, once.
 # ══════════════════════════════════════════════════════════════════════════════
-
+# shellcheck source=bootstrap/00-variables.sh
 source "$(dirname "$0")/00-variables.sh"
 
-PROVIDERS=(
-  Microsoft.Compute
-  Microsoft.Network
-  Microsoft.Storage
-  Microsoft.KeyVault
-  Microsoft.ContainerService      # AKS
-  Microsoft.ContainerRegistry     # ACR
-  Microsoft.ManagedIdentity
-  Microsoft.OperationalInsights   # Log Analytics
-  Microsoft.Insights              # diagnostic settings, App Insights
-  Microsoft.Sql
-  Microsoft.Web                   # App Service
-  Microsoft.PolicyInsights        # Azure Policy compliance data
+WORKLOAD_PROVIDERS=(
+  Microsoft.Compute Microsoft.Network Microsoft.Storage Microsoft.KeyVault
+  Microsoft.ManagedIdentity Microsoft.Insights Microsoft.OperationalInsights
+  Microsoft.PolicyInsights
 )
 
-for ENV in "${ENVIRONMENTS[@]}"; do
-  SUB_ID="$(sub_for_env "$ENV")"
-  az account set --subscription "$SUB_ID"
-  echo ""
-  echo "── Registering providers in $ENV ──"
-
-  for P in "${PROVIDERS[@]}"; do
-    STATE=$(az provider show --namespace "$P" --query registrationState -o tsv 2>/dev/null || echo "NotFound")
+register() {                                # <subscription> <provider...>
+  local SUB="$1"; shift
+  az account set --subscription "$SUB"
+  for P in "$@"; do
+    STATE="$(az provider show --namespace "$P" --query registrationState -o tsv 2>/dev/null || echo NotRegistered)"
     if [ "$STATE" = "Registered" ]; then
-      echo "  $P: already registered"
+      echo "   $P registered"
     else
       az provider register --namespace "$P" --output none
-      echo "  $P: registration submitted"
+      echo "   $P submitted"
     fi
   done
+}
+
+echo "── management"; register "$SUB_MGMT" Microsoft.Storage
+for ENV in "${ENVIRONMENTS[@]}"; do
+  echo "── $ENV"; register "$(sub_for_env "$ENV")" "${WORKLOAD_PROVIDERS[@]}"
 done
 
-echo ""
-echo "Registration can take several minutes to complete in the background."
-echo "Check with: az provider show --namespace Microsoft.ContainerService --query registrationState -o tsv"
+echo "Registration completes in the background, usually within minutes."

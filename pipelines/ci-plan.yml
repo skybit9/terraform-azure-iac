@@ -1,126 +1,76 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# CI — Dry run. Plans every stack in every environment. NEVER applies.
-#
-# Branch strategy:
-#   feature/* -> PR into main -> THIS pipeline
+# CI: dry run. Plans every stack in every environment. NEVER applies.
+#   feature/* -> PR into main -> this pipeline
 #   main      -> merge        -> cd-apply.yml
-#
-# Identity: the *-plan service connections, which hold Reader on the resource
-# group. A plan does not need write access, so a malicious PR adding an apply
-# step cannot change Azure.
 # ══════════════════════════════════════════════════════════════════════════════
 
-name: 'CI-Plan-$(Build.SourceBranchName)-$(Date:yyyyMMdd)$(Rev:.r)'
+name: 'CI-Plan-$(Date:yyyyMMdd)$(Rev:.r)'
 
-trigger: none          # merges are CD's job
+trigger: none
 
 pr:
   branches:
     include: [main]
   paths:
-    include:
-      - 'environments/**'
-      - 'modules/**'
+    include: [environments, modules, pipelines, .checkov.yaml, .tflint.hcl]
+
+parameters:
+  - name: environments
+    type: object
+    default: [dev, staging, prod]
+  - name: stacks
+    type: object
+    default: [networking, keyvault, app]
 
 variables:
-  TF_VERSION: '1.9.8'
+  TF_VERSION: '1.16.3'
   STATE_RG: 'rg-terraform-state'
   TF_IN_AUTOMATION: 'true'
-  TF_INPUT: 'false'
 
 stages:
-
   - stage: Validate
     displayName: 'Validate'
     jobs:
       - job: Static
-        pool: { vmImage: 'ubuntu-latest' }
+        pool: {vmImage: ubuntu-latest}
         steps:
           - task: TerraformInstaller@1
-            inputs: { terraformVersion: $(TF_VERSION) }
+            inputs: {terraformVersion: $(TF_VERSION)}
 
-          - script: terraform fmt -check -recursive
+          - script: terraform fmt -check -recursive -diff
             displayName: 'Format check'
 
-          - script: |
-              set -e
-              for env in dev staging prod; do
-                for stack in networking keyvault app; do
-                  echo "Validating $env/$stack"
-                  cd "$(Build.SourcesDirectory)/environments/$env/$stack"
-                  terraform init -backend=false    # syntax only, no backend
-                  terraform validate
-                done
-              done
-            displayName: 'Validate all stacks'
+          - ${{ each env in parameters.environments }}:
+              - ${{ each stack in parameters.stacks }}:
+                  - script: |
+                      set -euo pipefail
+                      terraform init -backend=false -input=false
+                      terraform validate
+                    displayName: 'Validate ${{ env }}/${{ stack }}'
+                    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ env }}/${{ stack }}'
 
           - script: |
-              curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
-              tflint --init
-              tflint --recursive --format compact
+              set -euo pipefail
+              curl -sSL https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+              tflint --init --config "$(Build.SourcesDirectory)/.tflint.hcl"
+              tflint --recursive --config "$(Build.SourcesDirectory)/.tflint.hcl" --format compact
             displayName: 'TFLint'
+            env:
+              GITHUB_TOKEN: $(System.AccessToken)
 
-  # Stacks plan in parallel: a plan is read-only and each touches a different
-  # state container.
-  - stage: PlanDev
-    displayName: 'Plan: Dev'
-    dependsOn: Validate
-    condition: succeeded()
-    jobs:
-      - job: Networking
-        pool: { vmImage: 'ubuntu-latest' }
-        steps:
-          - template: templates/plan-steps.yml
-            parameters: { environmentName: 'dev', stack: 'networking', stateStorageAccount: 'tfstatedev001' }
-      - job: KeyVault
-        pool: { vmImage: 'ubuntu-latest' }
-        steps:
-          - template: templates/plan-steps.yml
-            parameters: { environmentName: 'dev', stack: 'keyvault', stateStorageAccount: 'tfstatedev001' }
-      - job: App
-        pool: { vmImage: 'ubuntu-latest' }
-        steps:
-          - template: templates/plan-steps.yml
-            parameters: { environmentName: 'dev', stack: 'app', stateStorageAccount: 'tfstatedev001' }
-
-  - stage: PlanStaging
-    displayName: 'Plan: Staging'
-    dependsOn: Validate
-    condition: succeeded()
-    jobs:
-      - job: Networking
-        pool: { vmImage: 'ubuntu-latest' }
-        steps:
-          - template: templates/plan-steps.yml
-            parameters: { environmentName: 'staging', stack: 'networking', stateStorageAccount: 'tfstatestaging001' }
-      - job: KeyVault
-        pool: { vmImage: 'ubuntu-latest' }
-        steps:
-          - template: templates/plan-steps.yml
-            parameters: { environmentName: 'staging', stack: 'keyvault', stateStorageAccount: 'tfstatestaging001' }
-      - job: App
-        pool: { vmImage: 'ubuntu-latest' }
-        steps:
-          - template: templates/plan-steps.yml
-            parameters: { environmentName: 'staging', stack: 'app', stateStorageAccount: 'tfstatestaging001' }
-
-  - stage: PlanProd
-    displayName: 'Plan: Production'
-    dependsOn: Validate
-    condition: succeeded()
-    jobs:
-      - job: Networking
-        pool: { vmImage: 'ubuntu-latest' }
-        steps:
-          - template: templates/plan-steps.yml
-            parameters: { environmentName: 'prod', stack: 'networking', stateStorageAccount: 'tfstateprod001' }
-      - job: KeyVault
-        pool: { vmImage: 'ubuntu-latest' }
-        steps:
-          - template: templates/plan-steps.yml
-            parameters: { environmentName: 'prod', stack: 'keyvault', stateStorageAccount: 'tfstateprod001' }
-      - job: App
-        pool: { vmImage: 'ubuntu-latest' }
-        steps:
-          - template: templates/plan-steps.yml
-            parameters: { environmentName: 'prod', stack: 'app', stateStorageAccount: 'tfstateprod001' }
+  # Plans are read only and each stack has its own state container, so every
+  # environment and stack plans in parallel.
+  - ${{ each env in parameters.environments }}:
+      - stage: Plan_${{ env }}
+        displayName: 'Plan: ${{ env }}'
+        dependsOn: Validate
+        jobs:
+          - ${{ each stack in parameters.stacks }}:
+              - job: ${{ stack }}
+                displayName: '${{ stack }}'
+                pool: {vmImage: ubuntu-latest}
+                steps:
+                  - template: templates/plan-steps.yml
+                    parameters:
+                      environmentName: ${{ env }}
+                      stack: ${{ stack }}

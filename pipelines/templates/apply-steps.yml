@@ -1,9 +1,7 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# TEMPLATE — apply one stack in one environment
-#
-# Sequence inside the approval gate: init, fresh plan, apply that saved plan.
-# Applying a saved binary means Terraform cannot decide to do something
-# different between the plan the approver saw and the apply.
+# TEMPLATE: apply one stack in one environment (CD).
+# Inside the approval gate: init, fresh plan, apply exactly that saved plan.
+# Uses the *-apply service connection: Contributor on the resource group.
 # ══════════════════════════════════════════════════════════════════════════════
 
 parameters:
@@ -11,13 +9,12 @@ parameters:
     type: string
   - name: stack
     type: string
-  - name: stateStorageAccount
-    type: string
 
 steps:
+  - checkout: self
 
   - task: TerraformInstaller@1
-    displayName: 'Install Terraform'
+    displayName: 'Install Terraform $(TF_VERSION)'
     inputs:
       terraformVersion: $(TF_VERSION)
 
@@ -32,41 +29,43 @@ steps:
       inlineScript: |
         set -euo pipefail
 
+        # Workload identity federation: the service connection supplies an OIDC
+        # token. No client secret exists anywhere.
         export ARM_USE_OIDC=true
         export ARM_CLIENT_ID="$servicePrincipalId"
         export ARM_OIDC_TOKEN="$idToken"
         export ARM_TENANT_ID="$tenantId"
-        export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+        export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
 
-        terraform init \
+        # use_azuread_auth: the state accounts have shared key access disabled,
+        # so the backend must authenticate with Entra ID, not account keys.
+        terraform init -input=false \
           -backend-config="resource_group_name=$(STATE_RG)" \
-          -backend-config="storage_account_name=${{ parameters.stateStorageAccount }}" \
+          -backend-config="storage_account_name=tfstate${{ parameters.environmentName }}001" \
           -backend-config="container_name=tfstate-${{ parameters.stack }}" \
           -backend-config="key=terraform.tfstate" \
-          -backend-config="use_oidc=true"
+          -backend-config="use_oidc=true" \
+          -backend-config="use_azuread_auth=true"
 
-        # Lock IS taken here. -lock-timeout waits rather than failing instantly
-        # if another run holds it.
-        terraform plan -lock-timeout=5m -out=apply.binary
+        # State lock IS taken. -lock-timeout waits for a held lock instead of
+        # failing instantly.
+        terraform plan -input=false -lock-timeout=5m -out=apply.binary
         terraform show -no-color apply.binary > applied-plan.txt
-
-        echo "===== PLAN TO BE APPLIED ====="
         cat applied-plan.txt
 
-        # No -auto-approve needed: a saved plan file is already an approved
-        # decision, so Terraform will not prompt.
-        terraform apply -lock-timeout=5m apply.binary
+        # A saved plan file is already an approved decision: no -auto-approve.
+        terraform apply -input=false -lock-timeout=5m apply.binary
 
-  # Audit evidence, referenced by the change record for SOX and PCI DSS.
+  # Audit evidence referenced by the change record.
   - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}/applied-plan.txt'
-    artifact: 'applied-${{ parameters.environmentName }}-${{ parameters.stack }}-$(Build.BuildId)'
-    displayName: 'Publish applied plan as audit evidence'
+    artifact: 'applied-${{ parameters.environmentName }}-${{ parameters.stack }}-$(System.JobAttempt)'
+    displayName: 'Publish applied plan (audit evidence)'
     condition: always()
 
   - script: |
-      echo "Apply failed. Terraform apply is not transactional: resources created"
-      echo "before the failure remain in Azure and in state."
-      echo "Recovery: fix the root cause and re-run. Terraform applies only the delta."
-      echo "If Azure created a resource but state missed it, reconcile with terraform import."
-    displayName: 'Partial-failure guidance'
+      echo "Apply failed. Apply is not transactional: resources created before"
+      echo "the failure remain in Azure and in state. Fix the root cause and"
+      echo "re-run; Terraform applies only the delta. If Azure created a"
+      echo "resource that state missed, reconcile with terraform import first."
+    displayName: 'Partial failure guidance'
     condition: failed()

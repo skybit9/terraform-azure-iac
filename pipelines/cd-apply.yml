@@ -1,15 +1,14 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# CD — Apply. Runs only on merge to main.
+# CD: apply on merge to main.
 #
-# STACK ORDER IS NOT OPTIONAL: app reads networking and keyvault outputs via
-# terraform_remote_state, so those must be applied first or the app plan reads
-# stale or missing outputs.
+# One stage per environment, so the Environment approval is asked ONCE per
+# environment (checks are evaluated per stage). Inside, stacks apply in order:
+# networking, keyvault, app. The order is required: app reads the other two
+# through terraform_remote_state.
 #
-# This pipeline RE-PLANS rather than replaying the PR's plan artifact. Between
-# the PR plan and the merge, another PR may have merged and changed state.
-# The approver sees the fresh plan at the gate, then that exact binary applies.
-# Branch policy "require branches to be up to date before merging" keeps the two
-# plans near-identical.
+# CD re-plans inside the gate instead of replaying the PR artifact, so a PR
+# merged in between cannot cause a stale plan to be applied. Branch policy
+# "require branch up to date before merge" keeps the two plans near identical.
 # ══════════════════════════════════════════════════════════════════════════════
 
 name: 'CD-Apply-$(Date:yyyyMMdd)$(Rev:.r)'
@@ -18,163 +17,129 @@ trigger:
   branches:
     include: [main]
   paths:
-    include:
-      - 'environments/**'
-      - 'modules/**'
+    include: [environments, modules]
 
 pr: none
 
 variables:
-  TF_VERSION: '1.9.8'
+  TF_VERSION: '1.16.3'
   STATE_RG: 'rg-terraform-state'
   TF_IN_AUTOMATION: 'true'
-  TF_INPUT: 'false'
 
 stages:
-
-# ── DEV ───────────────────────────────────────────────────────────────────────
-  - stage: DevNetworking
-    displayName: 'Dev: networking'
+  - stage: dev
+    displayName: 'Apply: dev'
+    dependsOn: []
     jobs:
-      - deployment: Apply
-        environment: 'terraform-dev'        # approval gate lives on the Environment
-        pool: { vmImage: 'ubuntu-latest' }
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - checkout: self
-                - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'dev', stack: 'networking', stateStorageAccount: 'tfstatedev001' }
-
-  - stage: DevKeyVault
-    displayName: 'Dev: keyvault'
-    dependsOn: DevNetworking
-    condition: succeeded()
-    jobs:
-      - deployment: Apply
+      - deployment: networking
+        displayName: 'networking'
         environment: 'terraform-dev'
-        pool: { vmImage: 'ubuntu-latest' }
+        pool: {vmImage: ubuntu-latest}
         strategy:
           runOnce:
             deploy:
               steps:
-                - checkout: self
                 - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'dev', stack: 'keyvault', stateStorageAccount: 'tfstatedev001' }
+                  parameters: {environmentName: dev, stack: networking}
 
-  - stage: DevApp
-    displayName: 'Dev: app'
-    dependsOn: DevKeyVault
-    condition: succeeded()
-    jobs:
-      - deployment: Apply
+      - deployment: keyvault
+        displayName: 'keyvault'
+        dependsOn: networking
         environment: 'terraform-dev'
-        pool: { vmImage: 'ubuntu-latest' }
+        pool: {vmImage: ubuntu-latest}
         strategy:
           runOnce:
             deploy:
               steps:
-                - checkout: self
                 - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'dev', stack: 'app', stateStorageAccount: 'tfstatedev001' }
+                  parameters: {environmentName: dev, stack: keyvault}
 
-# ── STAGING ───────────────────────────────────────────────────────────────────
-  - stage: StagingNetworking
-    displayName: 'Staging: networking'
-    dependsOn: DevApp
-    condition: succeeded()
+      - deployment: app
+        displayName: 'app'
+        dependsOn: keyvault
+        environment: 'terraform-dev'
+        pool: {vmImage: ubuntu-latest}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - template: templates/apply-steps.yml
+                  parameters: {environmentName: dev, stack: app}
+
+  - stage: staging
+    displayName: 'Apply: staging'
+    dependsOn: dev
     jobs:
-      - deployment: Apply
+      - deployment: networking
+        displayName: 'networking'
         environment: 'terraform-staging'
-        pool: { vmImage: 'ubuntu-latest' }
+        pool: {vmImage: ubuntu-latest}
         strategy:
           runOnce:
             deploy:
               steps:
-                - checkout: self
                 - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'staging', stack: 'networking', stateStorageAccount: 'tfstatestaging001' }
+                  parameters: {environmentName: staging, stack: networking}
 
-  - stage: StagingKeyVault
-    displayName: 'Staging: keyvault'
-    dependsOn: StagingNetworking
-    condition: succeeded()
-    jobs:
-      - deployment: Apply
+      - deployment: keyvault
+        displayName: 'keyvault'
+        dependsOn: networking
         environment: 'terraform-staging'
-        pool: { vmImage: 'ubuntu-latest' }
+        pool: {vmImage: ubuntu-latest}
         strategy:
           runOnce:
             deploy:
               steps:
-                - checkout: self
                 - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'staging', stack: 'keyvault', stateStorageAccount: 'tfstatestaging001' }
+                  parameters: {environmentName: staging, stack: keyvault}
 
-  - stage: StagingApp
-    displayName: 'Staging: app'
-    dependsOn: StagingKeyVault
-    condition: succeeded()
-    jobs:
-      - deployment: Apply
+      - deployment: app
+        displayName: 'app'
+        dependsOn: keyvault
         environment: 'terraform-staging'
-        pool: { vmImage: 'ubuntu-latest' }
+        pool: {vmImage: ubuntu-latest}
         strategy:
           runOnce:
             deploy:
               steps:
-                - checkout: self
                 - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'staging', stack: 'app', stateStorageAccount: 'tfstatestaging001' }
+                  parameters: {environmentName: staging, stack: app}
 
-# ── PRODUCTION ────────────────────────────────────────────────────────────────
-# terraform-prod Environment requires a senior approver. The applied-plan
-# artifact from each stage is the CAB evidence package.
-  - stage: ProdNetworking
-    displayName: 'Prod: networking'
-    dependsOn: StagingApp
-    condition: succeeded()
+  - stage: prod
+    displayName: 'Apply: prod'
+    dependsOn: staging
     jobs:
-      - deployment: Apply
+      - deployment: networking
+        displayName: 'networking'
         environment: 'terraform-prod'
-        pool: { vmImage: 'ubuntu-latest' }
+        pool: {vmImage: ubuntu-latest}
         strategy:
           runOnce:
             deploy:
               steps:
-                - checkout: self
                 - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'prod', stack: 'networking', stateStorageAccount: 'tfstateprod001' }
+                  parameters: {environmentName: prod, stack: networking}
 
-  - stage: ProdKeyVault
-    displayName: 'Prod: keyvault'
-    dependsOn: ProdNetworking
-    condition: succeeded()
-    jobs:
-      - deployment: Apply
+      - deployment: keyvault
+        displayName: 'keyvault'
+        dependsOn: networking
         environment: 'terraform-prod'
-        pool: { vmImage: 'ubuntu-latest' }
+        pool: {vmImage: ubuntu-latest}
         strategy:
           runOnce:
             deploy:
               steps:
-                - checkout: self
                 - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'prod', stack: 'keyvault', stateStorageAccount: 'tfstateprod001' }
+                  parameters: {environmentName: prod, stack: keyvault}
 
-  - stage: ProdApp
-    displayName: 'Prod: app'
-    dependsOn: ProdKeyVault
-    condition: succeeded()
-    jobs:
-      - deployment: Apply
+      - deployment: app
+        displayName: 'app'
+        dependsOn: keyvault
         environment: 'terraform-prod'
-        pool: { vmImage: 'ubuntu-latest' }
+        pool: {vmImage: ubuntu-latest}
         strategy:
           runOnce:
             deploy:
               steps:
-                - checkout: self
                 - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'prod', stack: 'app', stateStorageAccount: 'tfstateprod001' }
+                  parameters: {environmentName: prod, stack: app}

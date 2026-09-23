@@ -1,6 +1,8 @@
-# Backend values are supplied at init time by the pipeline via -backend-config.
-# State for dev/keyvault lives in the MANAGEMENT subscription, in the
-# dev storage account, in the tfstate-keyvault container.
+# Values supplied at init by the pipeline via -backend-config:
+#   storage account : tfstatedev001 (management subscription)
+#   container       : tfstate-keyvault
+#   key             : terraform.tfstate
+#   use_azuread_auth: true (shared key access is disabled on the account)
 terraform {
   backend "azurerm" {}
 }

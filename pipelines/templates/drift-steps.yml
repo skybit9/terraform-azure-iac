@@ -1,6 +1,6 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# TEMPLATE: plan one stack in one environment (CI). Never applies.
-# Uses the *-plan service connection: Reader on the resource group.
+# TEMPLATE: drift check one stack (read only, uses the *-plan connection).
+#   exit 0 = matches code   exit 1 = error   exit 2 = drift
 # ══════════════════════════════════════════════════════════════════════════════
 
 parameters:
@@ -16,7 +16,7 @@ steps:
       terraformVersion: $(TF_VERSION)
 
   - task: AzureCLI@2
-    displayName: 'Plan ${{ parameters.environmentName }}/${{ parameters.stack }}'
+    displayName: 'Drift check ${{ parameters.environmentName }}/${{ parameters.stack }}'
     inputs:
       azureSubscription: 'SVC-TF-${{ parameters.environmentName }}-${{ parameters.stack }}-plan'
       scriptType: bash
@@ -44,36 +44,24 @@ steps:
           -backend-config="use_oidc=true" \
           -backend-config="use_azuread_auth=true"
 
-        # -lock=false is safe on a read only plan and never blocks a running
-        # apply. Never used on apply.
-        terraform plan -input=false -lock=false -out=tfplan.binary
-        terraform show -json tfplan.binary > tfplan.json
-        terraform show -no-color tfplan.binary > tfplan.txt
+        # set -e would abort on exit code 2, so capture it explicitly.
+        set +e
+        terraform plan -input=false -lock=false -detailed-exitcode -no-color > drift.txt 2>&1
+        CODE=$?
+        set -e
+        cat drift.txt
 
-  # Scan the RESOLVED plan, not raw HCL: variables, locals, and module outputs
-  # are evaluated. Installed in a venv because ubuntu-latest marks the system
-  # Python as externally managed.
-  - script: |
-      set -euo pipefail
-      python3 -m venv "$(Agent.TempDirectory)/checkov"
-      "$(Agent.TempDirectory)/checkov/bin/pip" install --quiet checkov
-      "$(Agent.TempDirectory)/checkov/bin/checkov" \
-        -f tfplan.json \
-        --framework terraform_plan \
-        --config-file "$(Build.SourcesDirectory)/.checkov.yaml" \
-        --output cli --output junitxml \
-        --output-file-path console,checkov.xml
-    displayName: 'Checkov ${{ parameters.environmentName }}/${{ parameters.stack }}'
-    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}'
+        if [ "$CODE" -eq 0 ]; then
+          echo "No drift: Azure matches the code."
+        elif [ "$CODE" -eq 2 ]; then
+          echo "##vso[task.logissue type=error]Drift detected in ${{ parameters.environmentName }}/${{ parameters.stack }}."
+          exit 1
+        else
+          echo "##vso[task.logissue type=error]terraform plan errored (exit $CODE)."
+          exit "$CODE"
+        fi
 
-  - task: PublishTestResults@2
-    displayName: 'Publish Checkov results'
+  - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}/drift.txt'
+    artifact: 'drift-${{ parameters.environmentName }}-${{ parameters.stack }}-$(System.JobAttempt)'
+    displayName: 'Publish drift report'
     condition: always()
-    inputs:
-      testResultsFormat: JUnit
-      testResultsFiles: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}/checkov.xml'
-      testRunTitle: 'Checkov ${{ parameters.environmentName }}-${{ parameters.stack }}'
-
-  - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}/tfplan.txt'
-    artifact: 'plan-${{ parameters.environmentName }}-${{ parameters.stack }}-$(System.JobAttempt)'
-    displayName: 'Publish plan for review'

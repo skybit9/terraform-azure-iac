@@ -1,55 +1,38 @@
-# Terraform Azure DevOps Bootstrap
+# Bootstrap
 
-Creates everything that must exist **before** the CI and CD pipelines can run.
+Creates everything that must exist before the pipelines can run. Idempotent:
+every script is safe to re-run.
 
 ## Run order
 
 ```bash
-source ./00-variables.sh     # edit the values in this file first
-./01-state-backend.sh        # storage account for state (chicken-and-egg resource)
-./02-identities.sh           # 6 service principals: plan + apply per environment
-source ./identities.env      # load the generated IDs
-./03-rbac.sh                 # role assignments, including the data-plane role
-# --- create the 6 service connections in Azure DevOps now (manual WIF) ---
-./04-federated-credentials.sh
-./05-providers.sh            # register resource providers
-./99-verify.sh               # confirm everything before a pipeline run
+cd bootstrap
+# 1. edit subscription IDs, ADO org and project in 00-variables.sh
+./01-state-backend.sh           # state accounts + containers (management sub)
+./02-identities.sh              # 18 service principals -> identities.env
+./03-rbac.sh                    # resource groups, custom role, all role assignments
+#    ── create 18 service connections in Azure DevOps (see 04 header) ──
+./04-federated-credentials.sh   # workload identity federation, no secrets
+./05-providers.sh               # resource provider registration
+./99-verify.sh                  # exits non-zero if anything is missing
 ```
 
-Step 04 has a manual break: the Azure DevOps service connection must exist first
-so you can match its subject identifier.
+Also create in Azure DevOps: Environments `terraform-dev`, `terraform-staging`,
+`terraform-prod` with approvers, and branch policy on `main` (reviewers, CI
+must pass, branch up to date before merge).
 
-## What gets created
+## Why each role exists
 
-| Script | Creates |
-|---|---|
-| 01 | `rg-terraform-state`, storage account with versioning and soft delete, `tfstate` container, delete lock |
-| 02 | 6 app registrations: `sp-terraform-{env}-{plan,apply}` |
-| 03 | Reader (plan) or Contributor (apply) on each subscription, plus Storage Blob Data Contributor on the state account |
-| 04 | Federated credentials so no client secrets exist |
-| 05 | Resource provider registration per subscription |
-| 99 | Verification of all of the above |
+| Identity | Role | Scope | Needed because |
+|---|---|---|---|
+| every `*-plan` | Reader | own RG | plan refreshes existing resources |
+| every `*-apply` | Contributor | own RG | apply creates and changes resources |
+| every identity | Storage Blob Data Contributor | own state container | Contributor on a storage account does not grant blob access; plan also writes state |
+| `app-*` | Storage Blob Data Reader | networking + keyvault containers | `terraform_remote_state` reads their outputs |
+| `app-*` | Reader | `rg-keyvault-<env>` | read the vault's properties |
+| `app-plan` | Key Vault Secrets User | `rg-keyvault-<env>` | refresh reads existing secret values |
+| `app-apply` | Key Vault Secrets Officer | `rg-keyvault-<env>` | writes the VM SSH key secrets |
+| `app-apply` | Terraform Subnet Joiner (custom) | `rg-networking-<env>` | a NIC joining a subnet in another RG needs `subnets/join/action` there |
 
-## Two design choices worth defending
-
-**Plan and apply use separate identities.** CI runs on every pull request. A plan
-needs Reader only. If CI ran as Contributor, a PR could add an apply step to the
-YAML and escalate. Separate identities close that path.
-
-**No client secrets.** Workload identity federation means the app registration
-trusts an OIDC token from a specific Azure DevOps org, project, and service
-connection. Nothing to rotate, leak, or store.
-
-## The failure this is built to avoid
-
-Contributor on a storage account is a **management plane** role. It does not grant
-read or write on the blobs inside. Terraform needs **Storage Blob Data Contributor**,
-a **data plane** role, to touch the state file. Without it `terraform init` succeeds
-and `terraform plan` fails with a 403, which reads like a bug rather than a missing
-role assignment. Script 99 checks for it explicitly.
-
-## Still manual in Azure DevOps
-
-- 6 service connections (workload identity federation, manual)
-- 3 Environments: `terraform-dev`, `terraform-staging`, `terraform-prod`, with approvers
-- Branch policy on `main`: required reviewers, CI must pass, branch up to date before merge
+The custom role grants only VNet read and subnet join. Network Contributor
+would also let the app stack modify the network.

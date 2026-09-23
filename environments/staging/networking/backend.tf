@@ -1,6 +1,8 @@
-# Backend values are supplied at init time by the pipeline via -backend-config.
-# State for staging/networking lives in the MANAGEMENT subscription, in the
-# staging storage account, in the tfstate-networking container.
+# Values supplied at init by the pipeline via -backend-config:
+#   storage account : tfstatestaging001 (management subscription)
+#   container       : tfstate-networking
+#   key             : terraform.tfstate
+#   use_azuread_auth: true (shared key access is disabled on the account)
 terraform {
   backend "azurerm" {}
 }

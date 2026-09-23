@@ -1,53 +1,39 @@
-variable "vm_name" {
-  type        = string
-  description = "Name of the virtual machine"
+variable "vms" {
+  type = map(object({
+    vm_size         = string
+    os_disk_size_gb = number
+    os_disk_type    = string
+  }))
+  description = "VMs to deploy, keyed by VM name."
 }
 
 variable "resource_group_name" {
   type        = string
-  description = "Resource group for this stack"
+  description = "Resource group for this stack."
 }
 
 variable "location" {
   type        = string
-  description = "Azure region"
-}
-
-variable "vm_size" {
-  type        = string
-  description = "VM SKU"
-}
-
-variable "os_disk_size_gb" {
-  type        = number
-  description = "OS disk size in GB"
-  default     = 128
-}
-
-variable "os_disk_type" {
-  type        = string
-  description = "Managed disk type"
-  default     = "Premium_LRS"
+  description = "Azure region."
 }
 
 variable "nsg_allowed_ssh_source" {
   type        = string
-  description = "Private CIDR permitted to reach port 22"
+  description = "Private CIDR permitted to reach port 22 on the VMs."
 }
 
-# Remote state location of the upstream stacks
 variable "state_resource_group" {
   type        = string
-  description = "Resource group holding the state storage accounts"
+  description = "Resource group holding the state storage accounts (management subscription)."
 }
 
 variable "state_storage_account" {
   type        = string
-  description = "State storage account for this environment"
+  description = "State storage account for this environment."
 }
 
 variable "tags" {
   type        = map(string)
-  description = "Tags applied to all resources"
+  description = "Tags applied to every resource."
   default     = {}
 }

@@ -1,0 +1,33 @@
+# Checkov configuration, used by CI (plan-steps.yml) and locally.
+#
+# Open source Checkov does NOT assign severities without a Prisma Cloud API
+# key, so severity thresholds (--hard-fail-on HIGH) do not work as intended.
+# This repo hard fails on EVERY finding instead, and each accepted exception is
+# listed here with its reason. Adding a skip requires a PR, so every exception
+# is reviewed.
+
+framework:
+  - terraform
+  - terraform_plan
+
+skip-check:
+  # Key Vault reachable on its public endpoint. Microsoft hosted pipeline
+  # agents write the VM SSH secrets from outside the VNet. Hardening path:
+  # private endpoint + self hosted agent in the VNet, then
+  # public_network_access_enabled = false and network_default_action = "Deny".
+  - CKV_AZURE_189   # Key Vault disables public network access
+  - CKV_AZURE_109   # Key Vault firewall default deny
+  - CKV2_AZURE_32   # Key Vault private endpoint
+
+  # SSH key secrets have no expiry. A timestamp() based expiry produces a diff
+  # on every plan. Keys rotate by replacing the VM.
+  - CKV_AZURE_41
+
+  # VM extensions allowed: Azure Monitor agent and Azure Policy guest
+  # configuration are delivered as extensions.
+  - CKV_AZURE_50
+
+  # Module sources pinned to a git tag (v1.0.0) rather than a commit SHA, for
+  # readable promotion. Only safe while release tags are protected from being
+  # moved or deleted (GitHub tag protection / Azure Repos branch policy).
+  - CKV_TF_1
