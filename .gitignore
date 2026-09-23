@@ -7,9 +7,11 @@
 .terraform/
 .terraform.lock.hcl
 
-# Real variable values (commit only *.example)
-*.tfvars
-!*.tfvars.example
+# tfvars in this repo hold no secrets (names, sizes, CIDRs, tags) and ARE
+# committed so each stack is reproducible. Secrets come from Key Vault or
+# remote state at runtime. Keep any local override file out:
+*.auto.tfvars
+*.local.tfvars
 
 # Saved plans
 *.tfplan

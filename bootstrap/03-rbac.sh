@@ -2,81 +2,98 @@
 # ══════════════════════════════════════════════════════════════════════════════
 # 03 — RBAC ASSIGNMENTS
 #
-# The trap this script avoids:
+# THE TRAP THIS AVOIDS:
 #   Contributor on a storage account is a MANAGEMENT plane role. It does not
-#   grant read/write on the blobs inside. Terraform needs the DATA plane role
-#   "Storage Blob Data Contributor" to touch the state file. Missing this is
-#   the most common first-run failure: init succeeds, plan fails with a 403.
+#   grant read or write on the blobs inside. Terraform needs the DATA plane role
+#   "Storage Blob Data Contributor" to touch the state file. Missing it means
+#   init succeeds and plan fails with a 403, which reads like a bug rather than
+#   a missing role assignment.
 #
-# Plan identities get Reader on the subscription, but still need WRITE on the
-# state blob, because terraform plan refreshes and updates state metadata.
+# SCOPES USED HERE:
+#   State  -> scoped to the CONTAINER, not the storage account. The AKS identity
+#             cannot read networking state.
+#   Azure  -> scoped to the RESOURCE GROUP, not the subscription. The app stack
+#             identity cannot modify networking resources.
+#
+# Plan identities still need WRITE on their own state container, because
+# terraform plan refreshes and updates state metadata.
 # ══════════════════════════════════════════════════════════════════════════════
 
 source "$(dirname "$0")/00-variables.sh"
 source "$(dirname "$0")/identities.env"
 
-# Scope of the state storage account (lives in the prod subscription)
-STATE_SA_SCOPE="/subscriptions/${SUB_PROD}/resourceGroups/${STATE_RG}/providers/Microsoft.Storage/storageAccounts/${STATE_SA}"
-
 for ENV in "${ENVIRONMENTS[@]}"; do
   SUB_ID="$(sub_for_env "$ENV")"
-  SUB_SCOPE="/subscriptions/${SUB_ID}"
-  UPPER_ENV=$(echo "$ENV" | tr '[:lower:]' '[:upper:]')
 
-  PLAN_SP=$(eval echo \$SPOBJ_${UPPER_ENV}_PLAN)
-  APPLY_SP=$(eval echo \$SPOBJ_${UPPER_ENV}_APPLY)
+  for STACK in "${STACKS[@]}"; do
+    RG_NAME="rg-${STACK}-${ENV}"
+    RG_SCOPE="/subscriptions/${SUB_ID}/resourceGroups/${RG_NAME}"
+    STATE_SCOPE="$(container_scope "$ENV" "$STACK")"
 
-  echo ""
-  echo "── RBAC for $ENV ──"
+    KEY_PLAN="$(echo "${ENV}_${STACK}_plan" | tr '[:lower:]-' '[:upper:]_')"
+    KEY_APPLY="$(echo "${ENV}_${STACK}_apply" | tr '[:lower:]-' '[:upper:]_')"
+    PLAN_SP=$(eval echo \$SPOBJ_${KEY_PLAN})
+    APPLY_SP=$(eval echo \$SPOBJ_${KEY_APPLY})
 
-  # ── PLAN identity: read-only on the subscription ───────────────────────────
-  az role assignment create \
-    --assignee-object-id "$PLAN_SP" \
-    --assignee-principal-type ServicePrincipal \
-    --role "Reader" \
-    --scope "$SUB_SCOPE" \
-    --output none
-  echo "  plan  : Reader on subscription"
+    echo ""
+    echo "── $ENV / $STACK ──"
 
-  # Plan still writes state metadata on refresh, so it needs the data role.
-  az role assignment create \
-    --assignee-object-id "$PLAN_SP" \
-    --assignee-principal-type ServicePrincipal \
-    --role "Storage Blob Data Contributor" \
-    --scope "$STATE_SA_SCOPE" \
-    --output none
-  echo "  plan  : Storage Blob Data Contributor on state SA"
+    # The resource group must exist before it can be an RBAC scope.
+    az account set --subscription "$SUB_ID"
+    az group create --name "$RG_NAME" --location "$LOCATION" \
+      --tags environment="$ENV" stack="$STACK" managed-by=terraform --output none
 
-  # ── APPLY identity: Contributor on the subscription ────────────────────────
-  az role assignment create \
-    --assignee-object-id "$APPLY_SP" \
-    --assignee-principal-type ServicePrincipal \
-    --role "Contributor" \
-    --scope "$SUB_SCOPE" \
-    --output none
-  echo "  apply : Contributor on subscription"
-
-  az role assignment create \
-    --assignee-object-id "$APPLY_SP" \
-    --assignee-principal-type ServicePrincipal \
-    --role "Storage Blob Data Contributor" \
-    --scope "$STATE_SA_SCOPE" \
-    --output none
-  echo "  apply : Storage Blob Data Contributor on state SA"
-
-  # ── Optional: role assignment creation ─────────────────────────────────────
-  # Only if Terraform itself creates role assignments. This is privileged:
-  # User Access Administrator can grant any role to anyone. Default is off.
-  if [ "$NEEDS_RBAC_WRITE" = "true" ]; then
+    # ── PLAN identity ────────────────────────────────────────────────────────
     az role assignment create \
-      --assignee-object-id "$APPLY_SP" \
-      --assignee-principal-type ServicePrincipal \
-      --role "User Access Administrator" \
-      --scope "$SUB_SCOPE" \
-      --output none
-    echo "  apply : User Access Administrator on subscription (RBAC write enabled)"
-  fi
+      --assignee-object-id "$PLAN_SP" --assignee-principal-type ServicePrincipal \
+      --role "Reader" --scope "$RG_SCOPE" --output none
+    echo "  plan  : Reader on $RG_NAME"
+
+    az role assignment create \
+      --assignee-object-id "$PLAN_SP" --assignee-principal-type ServicePrincipal \
+      --role "Storage Blob Data Contributor" --scope "$STATE_SCOPE" --output none
+    echo "  plan  : Blob Data Contributor on state container"
+
+    # ── APPLY identity ───────────────────────────────────────────────────────
+    az role assignment create \
+      --assignee-object-id "$APPLY_SP" --assignee-principal-type ServicePrincipal \
+      --role "Contributor" --scope "$RG_SCOPE" --output none
+    echo "  apply : Contributor on $RG_NAME"
+
+    az role assignment create \
+      --assignee-object-id "$APPLY_SP" --assignee-principal-type ServicePrincipal \
+      --role "Storage Blob Data Contributor" --scope "$STATE_SCOPE" --output none
+    echo "  apply : Blob Data Contributor on state container"
+
+    if [ "$NEEDS_RBAC_WRITE" = "true" ]; then
+      az role assignment create \
+        --assignee-object-id "$APPLY_SP" --assignee-principal-type ServicePrincipal \
+        --role "User Access Administrator" --scope "$RG_SCOPE" --output none
+      echo "  apply : User Access Administrator on $RG_NAME"
+    fi
+  done
+done
+
+# ── CROSS-STACK READS ─────────────────────────────────────────────────────────
+# The app stack consumes outputs from networking and keyvault via
+# terraform_remote_state. That needs READ on those containers.
+# Granted narrowly: Storage Blob Data READER on one container, never Reader on
+# the whole account, which would undo the isolation above.
+echo ""
+echo "── Cross-stack remote state reads ──"
+for ENV in "${ENVIRONMENTS[@]}"; do
+  for KIND in plan apply; do
+    KEY_APP="$(echo "${ENV}_app_${KIND}" | tr '[:lower:]-' '[:upper:]_')"
+    APP_SP=$(eval echo \$SPOBJ_${KEY_APP})
+    for UPSTREAM in networking keyvault; do
+      az role assignment create \
+        --assignee-object-id "$APP_SP" --assignee-principal-type ServicePrincipal \
+        --role "Storage Blob Data Reader" \
+        --scope "$(container_scope "$ENV" "$UPSTREAM")" --output none
+      echo "  $ENV app-$KIND : Blob Data Reader on $UPSTREAM state"
+    done
+  done
 done
 
 echo ""
-echo "RBAC complete. Note: assignments can take a few minutes to propagate."
+echo "RBAC complete. Assignments can take a few minutes to propagate."

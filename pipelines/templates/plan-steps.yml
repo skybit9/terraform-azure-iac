@@ -1,14 +1,18 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# REUSABLE TEMPLATE — plan steps for one environment
-# Called by ci-plan.yml once per environment so the logic lives in one place.
+# TEMPLATE — plan one stack in one environment
+#
+# Auth is workload identity federation: the service connection supplies the
+# OIDC token, so there is no client secret and no Key Vault lookup for ARM
+# credentials. That is why AzureCLI@2 wraps the terraform calls: it exports
+# the federated token into the environment.
 # ══════════════════════════════════════════════════════════════════════════════
 
 parameters:
   - name: environmentName
     type: string
-  - name: serviceConnection
+  - name: stack
     type: string
-  - name: keyVaultName
+  - name: stateStorageAccount
     type: string
 
 steps:
@@ -18,82 +22,62 @@ steps:
     inputs:
       terraformVersion: $(TF_VERSION)
 
-  # Credentials pulled at runtime. Nothing stored in pipeline variables.
-  - task: AzureKeyVault@2
-    displayName: 'Pull ARM credentials (${{ parameters.environmentName }})'
+  - task: AzureCLI@2
+    displayName: 'Plan ${{ parameters.environmentName }}/${{ parameters.stack }}'
     inputs:
-      azureSubscription: ${{ parameters.serviceConnection }}
-      KeyVaultName: ${{ parameters.keyVaultName }}
-      SecretsFilter: 'ARM-CLIENT-ID,ARM-CLIENT-SECRET,ARM-TENANT-ID,ARM-SUBSCRIPTION-ID'
-      RunAsPreJob: true
+      # Service connection naming matches bootstrap/04: SVC-TF-<env>-<stack>-plan
+      azureSubscription: 'SVC-TF-${{ parameters.environmentName }}-${{ parameters.stack }}-plan'
+      scriptType: bash
+      scriptLocation: inlineScript
+      workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}'
+      # addSpnToEnvironment exposes the federated token to the script so the
+      # azurerm provider can use OIDC.
+      addSpnToEnvironment: true
+      inlineScript: |
+        set -euo pipefail
 
-  - script: |
-      terraform init \
-        -backend-config="resource_group_name=$(BACKEND_RG)" \
-        -backend-config="storage_account_name=$(BACKEND_SA)" \
-        -backend-config="container_name=$(BACKEND_CONTAINER)" \
-        -backend-config="key=${{ parameters.environmentName }}.terraform.tfstate"
-    displayName: 'Init (${{ parameters.environmentName }} backend)'
-    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}'
-    env:
-      ARM_CLIENT_ID: $(ARM-CLIENT-ID)
-      ARM_CLIENT_SECRET: $(ARM-CLIENT-SECRET)
-      ARM_TENANT_ID: $(ARM-TENANT-ID)
-      ARM_SUBSCRIPTION_ID: $(ARM-SUBSCRIPTION-ID)
+        export ARM_USE_OIDC=true
+        export ARM_CLIENT_ID="$servicePrincipalId"
+        export ARM_OIDC_TOKEN="$idToken"
+        export ARM_TENANT_ID="$tenantId"
+        export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
 
-  - script: |
-      # -lock=false is SAFE on plan and avoids blocking a concurrent apply.
-      # Never use -lock=false on apply.
-      terraform plan \
-        -lock=false \
-        -var-file=terraform.tfvars \
-        -out=plan-${{ parameters.environmentName }}.binary
+        # Container per stack: the container IS the RBAC boundary, so the key
+        # is simply terraform.tfstate inside it.
+        terraform init \
+          -backend-config="resource_group_name=$(STATE_RG)" \
+          -backend-config="storage_account_name=${{ parameters.stateStorageAccount }}" \
+          -backend-config="container_name=tfstate-${{ parameters.stack }}" \
+          -backend-config="key=terraform.tfstate" \
+          -backend-config="use_oidc=true"
 
-      terraform show -json plan-${{ parameters.environmentName }}.binary \
-        > plan-${{ parameters.environmentName }}.json
-
-      terraform show -no-color plan-${{ parameters.environmentName }}.binary \
-        > plan-${{ parameters.environmentName }}.txt
-    displayName: 'Plan (${{ parameters.environmentName }})'
-    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}'
-    env:
-      ARM_CLIENT_ID: $(ARM-CLIENT-ID)
-      ARM_CLIENT_SECRET: $(ARM-CLIENT-SECRET)
-      ARM_TENANT_ID: $(ARM-TENANT-ID)
-      ARM_SUBSCRIPTION_ID: $(ARM-SUBSCRIPTION-ID)
+        # -lock=false is safe on plan and avoids blocking a running apply.
+        # Never use it on apply.
+        terraform plan -lock=false -out=tfplan.binary
+        terraform show -json tfplan.binary > tfplan.json
+        terraform show -no-color tfplan.binary > tfplan.txt
 
   # Scan the RESOLVED plan, not raw HCL. Raw HCL misses values that only exist
   # after variables, locals, and module outputs are evaluated.
   - script: |
       pip install checkov --quiet
-      checkov \
-        -f plan-${{ parameters.environmentName }}.json \
+      checkov -f tfplan.json \
         --framework terraform_plan \
-        --output cli \
-        --output junitxml \
-        --output-file-path console,checkov-${{ parameters.environmentName }}.xml \
+        --output cli --output junitxml \
+        --output-file-path console,checkov.xml \
         --soft-fail-on MEDIUM,LOW \
         --hard-fail-on HIGH,CRITICAL
-    displayName: 'Checkov scan of plan JSON (${{ parameters.environmentName }})'
-    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}'
+    displayName: 'Checkov: ${{ parameters.environmentName }}/${{ parameters.stack }}'
+    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}'
 
   - task: PublishTestResults@2
     displayName: 'Publish Checkov results'
     condition: always()
     inputs:
       testResultsFormat: 'JUnit'
-      testResultsFiles: '**/checkov-${{ parameters.environmentName }}.xml'
-      testRunTitle: 'Checkov ${{ parameters.environmentName }}'
+      testResultsFiles: '**/environments/${{ parameters.environmentName }}/${{ parameters.stack }}/checkov.xml'
+      testRunTitle: 'Checkov ${{ parameters.environmentName }}-${{ parameters.stack }}'
 
-  # The binary is what CD will apply. The JSON and TXT are for human review.
-  - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/plan-${{ parameters.environmentName }}.binary'
-    artifact: 'plan-${{ parameters.environmentName }}-binary'
-    displayName: 'Publish plan binary'
-
-  - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/plan-${{ parameters.environmentName }}.json'
-    artifact: 'plan-${{ parameters.environmentName }}-json'
-    displayName: 'Publish plan JSON'
-
-  - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/plan-${{ parameters.environmentName }}.txt'
-    artifact: 'plan-${{ parameters.environmentName }}-txt'
-    displayName: 'Publish human-readable plan'
+  - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}/tfplan.txt'
+    artifact: 'plan-${{ parameters.environmentName }}-${{ parameters.stack }}'
+    displayName: 'Publish plan for review'

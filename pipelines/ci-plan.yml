@@ -1,25 +1,22 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# CI PIPELINE — Dry Run (terraform plan only, NEVER applies)
+# CI — Dry run. Plans every stack in every environment. NEVER applies.
 #
 # Branch strategy:
-#   feature/*  -> PR raised against main -> THIS pipeline runs
-#   main       -> merge                  -> cd-apply.yml runs
+#   feature/* -> PR into main -> THIS pipeline
+#   main      -> merge        -> cd-apply.yml
 #
-# Identity: service connection bound to a Reader + state-write SPN.
-# A plan does not need Contributor. Keeping CI read-only means a malicious
-# PR cannot add an apply step and escalate.
+# Identity: the *-plan service connections, which hold Reader on the resource
+# group. A plan does not need write access, so a malicious PR adding an apply
+# step cannot change Azure.
 # ══════════════════════════════════════════════════════════════════════════════
 
 name: 'CI-Plan-$(Build.SourceBranchName)-$(Date:yyyyMMdd)$(Rev:.r)'
 
-# Do NOT run on merge to main; that is CD's job.
-trigger: none
+trigger: none          # merges are CD's job
 
-# Run on every PR targeting main, and on every push to that PR branch.
 pr:
   branches:
-    include:
-      - main
+    include: [main]
   paths:
     include:
       - 'environments/**'
@@ -27,46 +24,35 @@ pr:
 
 variables:
   TF_VERSION: '1.9.8'
-  BACKEND_RG: 'rg-terraform-state'
-  BACKEND_SA: 'stterraformstate'
-  BACKEND_CONTAINER: 'tfstate'
-  # Never echo secrets; all ARM_* values come from Key Vault at runtime.
+  STATE_RG: 'rg-terraform-state'
   TF_IN_AUTOMATION: 'true'
   TF_INPUT: 'false'
 
 stages:
 
-# ── STAGE 1: STATIC CHECKS (no Azure access needed) ───────────────────────────
   - stage: Validate
-    displayName: 'Validate: fmt, lint, security'
+    displayName: 'Validate'
     jobs:
       - job: Static
-        displayName: 'Static analysis'
-        pool:
-          vmImage: 'ubuntu-latest'
+        pool: { vmImage: 'ubuntu-latest' }
         steps:
-          - checkout: self
-            fetchDepth: 0                      # full history so we can diff vs main
-
           - task: TerraformInstaller@1
-            displayName: 'Install Terraform $(TF_VERSION)'
-            inputs:
-              terraformVersion: $(TF_VERSION)
+            inputs: { terraformVersion: $(TF_VERSION) }
 
           - script: terraform fmt -check -recursive
             displayName: 'Format check'
-            # Fails if any .tf file is unformatted. Cheapest gate, run first.
 
           - script: |
               set -e
               for env in dev staging prod; do
-                echo "Validating $env"
-                cd $(Build.SourcesDirectory)/environments/$env
-                terraform init -backend=false     # no backend: syntax check only
-                terraform validate
-                cd -
+                for stack in networking keyvault app; do
+                  echo "Validating $env/$stack"
+                  cd "$(Build.SourcesDirectory)/environments/$env/$stack"
+                  terraform init -backend=false    # syntax only, no backend
+                  terraform validate
+                done
               done
-            displayName: 'Terraform validate (all environments)'
+            displayName: 'Validate all stacks'
 
           - script: |
               curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
@@ -74,82 +60,67 @@ stages:
               tflint --recursive --format compact
             displayName: 'TFLint'
 
-# ── STAGE 2: PLAN PER ENVIRONMENT ─────────────────────────────────────────────
-# One job per environment. They run in PARALLEL (no dependsOn between jobs)
-# because a plan is read-only and they touch different state files.
-  - stage: Plan
-    displayName: 'Plan: dev, staging, prod'
+  # Stacks plan in parallel: a plan is read-only and each touches a different
+  # state container.
+  - stage: PlanDev
+    displayName: 'Plan: Dev'
     dependsOn: Validate
     condition: succeeded()
     jobs:
-
-      - job: PlanDev
-        displayName: 'Plan Dev'
-        pool:
-          vmImage: 'ubuntu-latest'
-        variables:
-          ENV_NAME: 'dev'
+      - job: Networking
+        pool: { vmImage: 'ubuntu-latest' }
         steps:
           - template: templates/plan-steps.yml
-            parameters:
-              environmentName: 'dev'
-              serviceConnection: 'SVC-Terraform-Dev-Reader'
-              keyVaultName: 'kv-terraform-dev'
-
-      - job: PlanStaging
-        displayName: 'Plan Staging'
-        pool:
-          vmImage: 'ubuntu-latest'
+            parameters: { environmentName: 'dev', stack: 'networking', stateStorageAccount: 'stishelartfstatedev' }
+      - job: KeyVault
+        pool: { vmImage: 'ubuntu-latest' }
         steps:
           - template: templates/plan-steps.yml
-            parameters:
-              environmentName: 'staging'
-              serviceConnection: 'SVC-Terraform-Staging-Reader'
-              keyVaultName: 'kv-terraform-staging'
-
-      - job: PlanProd
-        displayName: 'Plan Production'
-        pool:
-          vmImage: 'ubuntu-latest'
+            parameters: { environmentName: 'dev', stack: 'keyvault', stateStorageAccount: 'stishelartfstatedev' }
+      - job: App
+        pool: { vmImage: 'ubuntu-latest' }
         steps:
           - template: templates/plan-steps.yml
-            parameters:
-              environmentName: 'prod'
-              serviceConnection: 'SVC-Terraform-Prod-Reader'
-              keyVaultName: 'kv-terraform-prod'
+            parameters: { environmentName: 'dev', stack: 'app', stateStorageAccount: 'stishelartfstatedev' }
 
-# ── STAGE 3: POST PLAN SUMMARY TO THE PULL REQUEST ────────────────────────────
-  - stage: PRComment
-    displayName: 'Post plan summary to PR'
-    dependsOn: Plan
+  - stage: PlanStaging
+    displayName: 'Plan: Staging'
+    dependsOn: Validate
     condition: succeeded()
     jobs:
-      - job: Comment
-        pool:
-          vmImage: 'ubuntu-latest'
+      - job: Networking
+        pool: { vmImage: 'ubuntu-latest' }
         steps:
-          - download: current
-            artifact: plan-prod-json
+          - template: templates/plan-steps.yml
+            parameters: { environmentName: 'staging', stack: 'networking', stateStorageAccount: 'stishelartfstatestaging' }
+      - job: KeyVault
+        pool: { vmImage: 'ubuntu-latest' }
+        steps:
+          - template: templates/plan-steps.yml
+            parameters: { environmentName: 'staging', stack: 'keyvault', stateStorageAccount: 'stishelartfstatestaging' }
+      - job: App
+        pool: { vmImage: 'ubuntu-latest' }
+        steps:
+          - template: templates/plan-steps.yml
+            parameters: { environmentName: 'staging', stack: 'app', stateStorageAccount: 'stishelartfstatestaging' }
 
-          - script: |
-              # Summarise the plan so the reviewer sees the blast radius in the PR
-              # without downloading an artifact. Counts come from the plan JSON.
-              CREATE=$(jq '[.resource_changes[] | select(.change.actions[0]=="create")] | length' \
-                $(Pipeline.Workspace)/plan-prod-json/plan-prod.json)
-              UPDATE=$(jq '[.resource_changes[] | select(.change.actions[0]=="update")] | length' \
-                $(Pipeline.Workspace)/plan-prod-json/plan-prod.json)
-              DELETE=$(jq '[.resource_changes[] | select(.change.actions[0]=="delete")] | length' \
-                $(Pipeline.Workspace)/plan-prod-json/plan-prod.json)
-
-              # A replace shows as ["delete","create"] — the dangerous case.
-              REPLACE=$(jq '[.resource_changes[] | select(.change.actions==["delete","create"])] | length' \
-                $(Pipeline.Workspace)/plan-prod-json/plan-prod.json)
-
-              echo "Prod plan: $CREATE to add, $UPDATE to change, $DELETE to destroy, $REPLACE to replace"
-
-              # Fail the PR if anything would be destroyed or replaced in Production
-              # without an explicit override label on the PR.
-              if [ "$DELETE" -gt 0 ] || [ "$REPLACE" -gt 0 ]; then
-                echo "##vso[task.logissue type=warning]Production plan contains destroy or replace operations. Senior review required."
-              fi
-            displayName: 'Summarise plan and flag destructive changes'
+  - stage: PlanProd
+    displayName: 'Plan: Production'
+    dependsOn: Validate
+    condition: succeeded()
+    jobs:
+      - job: Networking
+        pool: { vmImage: 'ubuntu-latest' }
+        steps:
+          - template: templates/plan-steps.yml
+            parameters: { environmentName: 'prod', stack: 'networking', stateStorageAccount: 'stishelartfstateprod' }
+      - job: KeyVault
+        pool: { vmImage: 'ubuntu-latest' }
+        steps:
+          - template: templates/plan-steps.yml
+            parameters: { environmentName: 'prod', stack: 'keyvault', stateStorageAccount: 'stishelartfstateprod' }
+      - job: App
+        pool: { vmImage: 'ubuntu-latest' }
+        steps:
+          - template: templates/plan-steps.yml
+            parameters: { environmentName: 'prod', stack: 'app', stateStorageAccount: 'stishelartfstateprod' }

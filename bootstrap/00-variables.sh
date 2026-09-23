@@ -1,9 +1,22 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════════════
 # SHARED VARIABLES
-# Source this before running any other script:  source ./00-variables.sh
+# Source before any other script:  source ./00-variables.sh
 #
-# Edit the values in this block only. Everything else is derived.
+# STATE TOPOLOGY
+#   One MANAGEMENT subscription holds all state storage accounts.
+#   One storage account per environment.
+#   One container per stack (which maps 1:1 to a resource group).
+#
+#   Why state does not live in the subscription it describes: if that
+#   subscription is deleted, disabled, or moved between tenants, the state
+#   describing it dies with it and every resource must be re-imported by hand.
+#
+#   Why one container per stack rather than one container with many blob keys:
+#   a CONTAINER is an RBAC scope, a blob key is not. Scoping
+#   "Storage Blob Data Contributor" at the container means the AKS pipeline
+#   identity cannot read the networking state. With one shared container,
+#   any identity with data access reads every state file in it.
 # ══════════════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -12,28 +25,38 @@ set -euo pipefail
 export LOCATION="canadacentral"
 export ORG_PREFIX="ishelar"                 # short, lowercase, no dashes
 
-# One subscription ID per environment. If all three share one subscription,
-# set all three to the same value; RBAC is then scoped per resource group.
+# Management subscription: hosts ALL state storage accounts.
+export SUB_MGMT="00000000-0000-0000-0000-000000000000"
+
+# Workload subscriptions, one per environment.
 export SUB_DEV="00000000-0000-0000-0000-000000000000"
 export SUB_STAGING="00000000-0000-0000-0000-000000000000"
 export SUB_PROD="00000000-0000-0000-0000-000000000000"
 
-# Azure DevOps org and project (used by 04 for service connection guidance)
+# Azure DevOps org and project (used by 04 for the federated subject)
 export ADO_ORG="https://dev.azure.com/yourorg"
 export ADO_PROJECT="YourProject"
 
-# Set true only if Terraform will create role assignments.
-# Grants User Access Administrator, which is privileged. Default false.
+# Stacks. Each stack is one resource group and gets its own container and
+# its own state file. Add a stack here and every script picks it up.
+export STACKS=("networking" "keyvault" "app")
+
+# Set true only if Terraform creates role assignments. Grants User Access
+# Administrator, which is privileged. Default false.
 export NEEDS_RBAC_WRITE="false"
 
 # ── Derived: do not edit ──────────────────────────────────────────────────────
 export STATE_RG="rg-terraform-state"
-export STATE_SA="st${ORG_PREFIX}tfstate"    # must be globally unique, <=24 chars
-export STATE_CONTAINER="tfstate"
-
 export ENVIRONMENTS=("dev" "staging" "prod")
 
-# Look up the subscription for an environment name
+# Storage account per environment, all inside SUB_MGMT.
+# Must be globally unique and 24 chars or fewer.
+sa_for_env() { echo "st${ORG_PREFIX}tfstate$1"; }
+
+# Container per stack. Container names: lowercase, dashes allowed.
+container_for_stack() { echo "tfstate-$1"; }
+
+# Workload subscription for an environment
 sub_for_env() {
   case "$1" in
     dev)     echo "$SUB_DEV" ;;
@@ -43,4 +66,13 @@ sub_for_env() {
   esac
 }
 
-echo "Variables loaded. State SA will be: $STATE_SA"
+# Full ARM scope of a container, used for container-scoped RBAC in script 03
+container_scope() {
+  local ENV=$1 STACK=$2
+  echo "/subscriptions/${SUB_MGMT}/resourceGroups/${STATE_RG}/providers/Microsoft.Storage/storageAccounts/$(sa_for_env "$ENV")/blobServices/default/containers/$(container_for_stack "$STACK")"
+}
+
+echo "Variables loaded."
+echo "  management subscription : $SUB_MGMT"
+echo "  state accounts          : $(sa_for_env dev), $(sa_for_env staging), $(sa_for_env prod)"
+echo "  stacks                  : ${STACKS[*]}"

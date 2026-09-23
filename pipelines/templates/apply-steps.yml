@@ -1,21 +1,17 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# REUSABLE TEMPLATE — apply steps for one environment
+# TEMPLATE — apply one stack in one environment
 #
-# Sequence inside the approval gate:
-#   1. init      (state lock acquired here)
-#   2. plan      (fresh, saved to binary)
-#   3. apply     (the binary from step 2, never a bare apply)
-#
-# Applying a saved binary rather than 'terraform apply -auto-approve' means
-# Terraform cannot decide to do something different between plan and apply.
+# Sequence inside the approval gate: init, fresh plan, apply that saved plan.
+# Applying a saved binary means Terraform cannot decide to do something
+# different between the plan the approver saw and the apply.
 # ══════════════════════════════════════════════════════════════════════════════
 
 parameters:
   - name: environmentName
     type: string
-  - name: serviceConnection
+  - name: stack
     type: string
-  - name: keyVaultName
+  - name: stateStorageAccount
     type: string
 
 steps:
@@ -25,73 +21,52 @@ steps:
     inputs:
       terraformVersion: $(TF_VERSION)
 
-  - task: AzureKeyVault@2
-    displayName: 'Pull ARM credentials (${{ parameters.environmentName }})'
+  - task: AzureCLI@2
+    displayName: 'Apply ${{ parameters.environmentName }}/${{ parameters.stack }}'
     inputs:
-      azureSubscription: ${{ parameters.serviceConnection }}
-      KeyVaultName: ${{ parameters.keyVaultName }}
-      SecretsFilter: 'ARM-CLIENT-ID,ARM-CLIENT-SECRET,ARM-TENANT-ID,ARM-SUBSCRIPTION-ID'
-      RunAsPreJob: true
+      azureSubscription: 'SVC-TF-${{ parameters.environmentName }}-${{ parameters.stack }}-apply'
+      scriptType: bash
+      scriptLocation: inlineScript
+      workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}'
+      addSpnToEnvironment: true
+      inlineScript: |
+        set -euo pipefail
 
-  - script: |
-      terraform init \
-        -backend-config="resource_group_name=$(BACKEND_RG)" \
-        -backend-config="storage_account_name=$(BACKEND_SA)" \
-        -backend-config="container_name=$(BACKEND_CONTAINER)" \
-        -backend-config="key=${{ parameters.environmentName }}.terraform.tfstate"
-    displayName: 'Init (${{ parameters.environmentName }})'
-    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}'
-    env:
-      ARM_CLIENT_ID: $(ARM-CLIENT-ID)
-      ARM_CLIENT_SECRET: $(ARM-CLIENT-SECRET)
-      ARM_TENANT_ID: $(ARM-TENANT-ID)
-      ARM_SUBSCRIPTION_ID: $(ARM-SUBSCRIPTION-ID)
+        export ARM_USE_OIDC=true
+        export ARM_CLIENT_ID="$servicePrincipalId"
+        export ARM_OIDC_TOKEN="$idToken"
+        export ARM_TENANT_ID="$tenantId"
+        export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
 
-  - script: |
-      # Fresh plan against current state. Lock IS taken here (no -lock=false).
-      # -lock-timeout waits rather than failing instantly if another run holds it.
-      terraform plan \
-        -lock-timeout=5m \
-        -var-file=terraform.tfvars \
-        -out=apply-${{ parameters.environmentName }}.binary
+        terraform init \
+          -backend-config="resource_group_name=$(STATE_RG)" \
+          -backend-config="storage_account_name=${{ parameters.stateStorageAccount }}" \
+          -backend-config="container_name=tfstate-${{ parameters.stack }}" \
+          -backend-config="key=terraform.tfstate" \
+          -backend-config="use_oidc=true"
 
-      terraform show -no-color apply-${{ parameters.environmentName }}.binary \
-        > apply-${{ parameters.environmentName }}.txt
+        # Lock IS taken here. -lock-timeout waits rather than failing instantly
+        # if another run holds it.
+        terraform plan -lock-timeout=5m -out=apply.binary
+        terraform show -no-color apply.binary > applied-plan.txt
 
-      echo "===== PLAN TO BE APPLIED ====="
-      cat apply-${{ parameters.environmentName }}.txt
-    displayName: 'Plan (fresh, pre-apply)'
-    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}'
-    env:
-      ARM_CLIENT_ID: $(ARM-CLIENT-ID)
-      ARM_CLIENT_SECRET: $(ARM-CLIENT-SECRET)
-      ARM_TENANT_ID: $(ARM-TENANT-ID)
-      ARM_SUBSCRIPTION_ID: $(ARM-SUBSCRIPTION-ID)
+        echo "===== PLAN TO BE APPLIED ====="
+        cat applied-plan.txt
 
-  - script: |
-      # Apply the SAVED binary. No -auto-approve needed: a saved plan file is
-      # already an approved decision, Terraform will not prompt.
-      terraform apply -lock-timeout=5m apply-${{ parameters.environmentName }}.binary
-    displayName: 'Apply (${{ parameters.environmentName }})'
-    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}'
-    env:
-      ARM_CLIENT_ID: $(ARM-CLIENT-ID)
-      ARM_CLIENT_SECRET: $(ARM-CLIENT-SECRET)
-      ARM_TENANT_ID: $(ARM-TENANT-ID)
-      ARM_SUBSCRIPTION_ID: $(ARM-SUBSCRIPTION-ID)
+        # No -auto-approve needed: a saved plan file is already an approved
+        # decision, so Terraform will not prompt.
+        terraform apply -lock-timeout=5m apply.binary
 
-  # Audit evidence. Retained per the pipeline's retention policy and referenced
-  # by the change record for SOX / PCI DSS traceability.
-  - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/apply-${{ parameters.environmentName }}.txt'
-    artifact: 'applied-plan-${{ parameters.environmentName }}-$(Build.BuildId)'
+  # Audit evidence, referenced by the change record for SOX and PCI DSS.
+  - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}/applied-plan.txt'
+    artifact: 'applied-${{ parameters.environmentName }}-${{ parameters.stack }}-$(Build.BuildId)'
     displayName: 'Publish applied plan as audit evidence'
     condition: always()
 
-  # On failure, surface what partially applied. Terraform apply is NOT
-  # transactional: resources created before the failure remain and are in state.
   - script: |
-      echo "Apply failed. Resources created before the failure remain in Azure and in state."
-      echo "Recovery: fix root cause, re-run. Terraform is idempotent and will apply only the delta."
-      echo "If Azure created a resource but state missed it, reconcile with terraform import first."
+      echo "Apply failed. Terraform apply is not transactional: resources created"
+      echo "before the failure remain in Azure and in state."
+      echo "Recovery: fix the root cause and re-run. Terraform applies only the delta."
+      echo "If Azure created a resource but state missed it, reconcile with terraform import."
     displayName: 'Partial-failure guidance'
     condition: failed()

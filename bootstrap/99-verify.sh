@@ -1,59 +1,66 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════════════
 # 99 — VERIFY
-#
-# Run after 01 through 05. Confirms every prerequisite exists before you try
-# a pipeline run, so a failure points at the pipeline rather than the setup.
+# Run after 01 through 05, so a pipeline failure points at the pipeline rather
+# than at missing setup.
 # ══════════════════════════════════════════════════════════════════════════════
 
 source "$(dirname "$0")/00-variables.sh"
 source "$(dirname "$0")/identities.env"
 
 FAIL=0
-ok()   { echo "  PASS  $1"; }
-bad()  { echo "  FAIL  $1"; FAIL=1; }
+ok()  { echo "  PASS  $1"; }
+bad() { echo "  FAIL  $1"; FAIL=1; }
 
-echo "── State backend ──"
-az account set --subscription "$SUB_PROD"
+echo "── State backend (management subscription) ──"
+az account set --subscription "$SUB_MGMT"
 
 az group show -n "$STATE_RG" -o none 2>/dev/null \
   && ok "resource group $STATE_RG" || bad "resource group $STATE_RG missing"
 
-az storage account show -n "$STATE_SA" -g "$STATE_RG" -o none 2>/dev/null \
-  && ok "storage account $STATE_SA" || bad "storage account $STATE_SA missing"
+for ENV in "${ENVIRONMENTS[@]}"; do
+  SA=$(sa_for_env "$ENV")
+  az storage account show -n "$SA" -g "$STATE_RG" -o none 2>/dev/null \
+    && ok "storage account $SA" || bad "storage account $SA missing"
 
-VERSIONING=$(az storage account blob-service-properties show \
-  --account-name "$STATE_SA" -g "$STATE_RG" \
-  --query isVersioningEnabled -o tsv 2>/dev/null || echo "false")
-[ "$VERSIONING" = "true" ] && ok "blob versioning enabled" || bad "blob versioning NOT enabled"
+  VERS=$(az storage account blob-service-properties show \
+    --account-name "$SA" -g "$STATE_RG" --query isVersioningEnabled -o tsv 2>/dev/null || echo false)
+  [ "$VERS" = "true" ] && ok "  versioning on $SA" || bad "  versioning OFF on $SA"
 
-PUBLIC=$(az storage account show -n "$STATE_SA" -g "$STATE_RG" \
-  --query allowBlobPublicAccess -o tsv)
-[ "$PUBLIC" = "false" ] && ok "public blob access disabled" || bad "public blob access is ENABLED"
+  PUB=$(az storage account show -n "$SA" -g "$STATE_RG" --query allowBlobPublicAccess -o tsv)
+  [ "$PUB" = "false" ] && ok "  public blob access disabled" || bad "  public blob access ENABLED on $SA"
+
+  for STACK in "${STACKS[@]}"; do
+    C=$(container_for_stack "$STACK")
+    az storage container show --name "$C" --account-name "$SA" --auth-mode login -o none 2>/dev/null \
+      && ok "  container $C" || bad "  container $C missing on $SA"
+  done
+done
 
 echo ""
-echo "── Identities and RBAC ──"
+echo "── Identities, RBAC, federation ──"
 for ENV in "${ENVIRONMENTS[@]}"; do
-  UPPER_ENV=$(echo "$ENV" | tr '[:lower:]' '[:upper:]')
-  for ROLE_KIND in plan apply; do
-    UPPER_KIND=$(echo "$ROLE_KIND" | tr '[:lower:]' '[:upper:]')
-    APP_ID=$(eval echo \$APPID_${UPPER_ENV}_${UPPER_KIND})
-    SP_OBJ=$(eval echo \$SPOBJ_${UPPER_ENV}_${UPPER_KIND})
+  for STACK in "${STACKS[@]}"; do
+    for KIND in plan apply; do
+      KEY="$(echo "${ENV}_${STACK}_${KIND}" | tr '[:lower:]-' '[:upper:]_')"
+      APP_ID=$(eval echo \$APPID_${KEY})
+      SP_OBJ=$(eval echo \$SPOBJ_${KEY})
+      LABEL="sp-tf-${ENV}-${STACK}-${KIND}"
 
-    az ad sp show --id "$APP_ID" -o none 2>/dev/null \
-      && ok "sp-terraform-${ENV}-${ROLE_KIND} exists" \
-      || bad "sp-terraform-${ENV}-${ROLE_KIND} missing"
+      az ad sp show --id "$APP_ID" -o none 2>/dev/null \
+        && ok "$LABEL exists" || bad "$LABEL missing"
 
-    COUNT=$(az role assignment list --assignee "$SP_OBJ" --all \
-      --query "length([?roleDefinitionName=='Storage Blob Data Contributor'])" -o tsv 2>/dev/null || echo 0)
-    [ "$COUNT" -gt 0 ] \
-      && ok "  data-plane role on state SA" \
-      || bad "  MISSING Storage Blob Data Contributor (plan will 403)"
+      # The data-plane role is the one that breaks plan with a 403 when absent.
+      SCOPE="$(container_scope "$ENV" "$STACK")"
+      N=$(az role assignment list --assignee "$SP_OBJ" --scope "$SCOPE" \
+        --query "length([?contains(roleDefinitionName,'Storage Blob Data')])" -o tsv 2>/dev/null || echo 0)
+      [ "$N" -gt 0 ] && ok "  data-plane role on its state container" \
+        || bad "  MISSING Storage Blob Data Contributor (plan will 403)"
 
-    FED=$(az ad app federated-credential list --id "$APP_ID" --query "length(@)" -o tsv 2>/dev/null || echo 0)
-    [ "$FED" -gt 0 ] \
-      && ok "  federated credential configured" \
-      || bad "  no federated credential (service connection will fail)"
+      F=$(az ad app federated-credential list --id "$APP_ID" --query "length(@)" -o tsv 2>/dev/null || echo 0)
+      [ "$F" -gt 0 ] && ok "  federated credential present" \
+        || bad "  no federated credential (service connection will fail)"
+    done
   done
 done
 
