@@ -1,4 +1,4 @@
-key_vault_name      = "kv-ishelar-prod"
+key_vault_name      = "kv-leastops-prod"
 resource_group_name = "rg-keyvault-prod"
 location            = "canadacentral"
 

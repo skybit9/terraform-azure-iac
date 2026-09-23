@@ -1,4 +1,4 @@
-key_vault_name      = "kv-ishelar-staging"
+key_vault_name      = "kv-leastops-staging"
 resource_group_name = "rg-keyvault-staging"
 location            = "canadacentral"
 
