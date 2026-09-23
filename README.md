@@ -4,6 +4,72 @@ Reference implementation for converting manually provisioned Azure
 infrastructure into governed, modular, pipeline-deployed Terraform on Azure
 DevOps.
 
+## Getting started
+
+Two separate systems. **Bootstrap** is run by hand, once, from your terminal.
+**Pipelines** run automatically in Azure DevOps afterward. Editing
+`bootstrap/00-variables.sh` does not trigger any pipeline, and pipelines never
+read it.
+
+### Phase 1: bootstrap (manual, once)
+
+Prerequisites: Azure CLI logged in (`az login`) as someone who can create app
+registrations, role assignments, and a custom role in all four subscriptions.
+
+| Step | Where | Action |
+|---|---|---|
+| 1 | `bootstrap/00-variables.sh` | Set `SUB_MGMT`, `SUB_DEV`, `SUB_STAGING`, `SUB_PROD`, `ADO_ORG_NAME`, `ADO_PROJECT` |
+| 2 | terminal | `az storage account check-name --name tfstatedev001` (and staging, prod). All must return `true` |
+| 3 | terminal | `./01-state-backend.sh` |
+| 4 | terminal | `./02-identities.sh` |
+| 5 | terminal | `./03-rbac.sh` |
+| 6 | Azure DevOps | Create **18 service connections**: Azure Resource Manager, Workload identity federation (manual), named exactly `SVC-TF-<env>-<stack>-<plan\|apply>`, each scoped to its environment's subscription |
+| 7 | terminal | `./04-federated-credentials.sh` |
+| 8 | Azure DevOps | **Verify and save** each of the 18 service connections |
+| 9 | terminal | `./05-providers.sh` |
+| 10 | terminal | `./99-verify.sh`. Do not continue until it passes |
+
+### Phase 2: Azure DevOps setup (manual, once)
+
+| Step | Where | Action |
+|---|---|---|
+| 11 | Pipelines > Environments | Create `terraform-dev`, `terraform-staging`, `terraform-prod`. Add approvers (a senior approver on prod) |
+| 12 | Pipelines > New pipeline | Register `pipelines/ci-plan.yml`, `pipelines/cd-apply.yml`, `pipelines/drift-detection.yml` |
+| 13 | Repos > Branches > `main` | Branch policy: minimum reviewers, **ci-plan** as required build validation, require branch up to date before merge |
+| 14 | Repo | Push `main`, then tag the module: `git tag -a v1.0.0 -m "linux-vm initial release" && git push origin v1.0.0`. Protect the tag |
+
+### Phase 3: first deployment
+
+| Step | Action | Expect |
+|---|---|---|
+| 15 | Run **cd-apply** manually, or merge any change under `environments/` | Approve `dev`; networking, keyvault, app apply in order |
+| 16 | Approve `staging`, then `prod` | Same order in each |
+| 17 | Next morning | **drift-detection** runs green |
+
+On a brand new environment the **app** stack's CI plan fails until
+networking and keyvault have been applied once, because there is no upstream
+state to read yet. This happens only the first time.
+
+### From then on (automatic)
+
+1. Branch `feature/*`, change code or tfvars, open a PR
+2. **CI** plans all stacks; review the plan output
+3. Merge: **CD** applies each environment after its approval
+4. **Drift detection** checks prod nightly
+
+### Kept in sync by hand
+
+These values live in more than one place and nothing links them.
+
+| Value | Defined in | Must match |
+|---|---|---|
+| State storage account names `tfstate<env>001` | `sa_for_env()` in `00-variables.sh` | `pipelines/templates/*.yml` and `state_storage_account` in `environments/*/app/terraform.tfvars` |
+| Resource group names `rg-<stack>-<env>` | `rg_for()` in `00-variables.sh` (created by `03-rbac.sh`) | `resource_group_name` in each `environments/*/*/terraform.tfvars` |
+| Service connection names | `04-federated-credentials.sh` | Azure DevOps connection names and `pipelines/templates/*.yml` |
+
+If a storage account name is taken globally, bump `001` to `002` in **all**
+three places.
+
 ## Layout
 
 ```
