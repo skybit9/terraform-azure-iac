@@ -2,23 +2,23 @@
 # ══════════════════════════════════════════════════════════════════════════════
 # 03: RESOURCE GROUPS AND RBAC
 #
-# Every grant here exists because a specific Terraform operation needs it:
+# EVERY STACK (shared and workload)
+#   plan  : Reader on its RG          apply : Contributor on its RG
+#   both  : Storage Blob Data Contributor on its OWN state container
+#           (data plane; Contributor on a storage account does not grant it;
+#            plan also writes state because refresh updates it)
 #
-#   All stacks, plan + apply
-#     Storage Blob Data Contributor on OWN state container
-#       (data plane: Contributor on a storage account does NOT grant blob access;
-#        plan also writes state, since refresh updates it)
-#   plan  : Reader on own RG            apply : Contributor on own RG
+# EVERY WORKLOAD RG (defaults: a workload uses the shared VNet and vault)
+#   both  : Storage Blob Data Reader on the networking + keyvault containers
+#   both  : Reader on the shared keyvault RG
+#   plan  : Key Vault Secrets User     apply : Key Vault Secrets Officer
+#   apply : Terraform Subnet Joiner on the shared networking RG
+#   A workload that does not use the shared vault or VNet does not need these;
+#   remove them by hand for least privilege.
 #
-#   app stack only
-#     Storage Blob Data Reader on networking + keyvault containers
-#       (terraform_remote_state reads their outputs)
-#     Reader on rg-keyvault             (read the vault's properties)
-#     plan  : Key Vault Secrets User    (refresh reads existing secret values)
-#     apply : Key Vault Secrets Officer (write the VM SSH key secrets)
-#     apply : Terraform Subnet Joiner on rg-networking
-#       (a NIC attaching to a subnet in ANOTHER resource group needs
-#        subnets/join/action there; Contributor on rg-app does not cover it)
+# EXISTING RESOURCE GROUPS ARE NEVER MODIFIED. "az group create" on an existing
+# group replaces its tags, which would show up as drift the moment the RG is
+# imported. Groups are only created when missing.
 # ══════════════════════════════════════════════════════════════════════════════
 # shellcheck source=bootstrap/00-variables.sh
 source "$(dirname "$0")/00-variables.sh"
@@ -38,9 +38,17 @@ grant() {                                   # <principal> <role> <scope>
   echo "    $2  ->  ${3##*/}"
 }
 
+ensure_rg() {                               # <env> <rg> <stack id>
+  if az group show --name "$2" --output none 2>/dev/null; then
+    echo "   $2 exists: left untouched"
+  else
+    az group create --name "$2" --location "$LOCATION" \
+      --tags environment="$1" stack="$3" managed-by=terraform --output none
+    echo "   $2 created"
+  fi
+}
+
 # ── Custom role: least privilege subnet join ─────────────────────────────────
-# No built in role grants only subnet join. Network Contributor would also let
-# the app stack modify the network itself.
 SCOPES_JSON="$(printf '"/subscriptions/%s",' "$SUB_DEV" "$SUB_STAGING" "$SUB_PROD" | sed 's/,$//')"
 if ! az role definition list --name "$SUBNET_JOIN_ROLE" --query '[0].id' -o tsv | grep -q .; then
   az role definition create --role-definition "{
@@ -53,50 +61,46 @@ if ! az role definition list --name "$SUBNET_JOIN_ROLE" --query '[0].id' -o tsv 
     ],
     \"AssignableScopes\": [ $SCOPES_JSON ]
   }" --output none
-  echo "Custom role created: $SUBNET_JOIN_ROLE (allow a minute to propagate)"
+  echo "Custom role created: $SUBNET_JOIN_ROLE (waiting for propagation)"
   sleep 60
 fi
 
 for ENV in "${ENVIRONMENTS[@]}"; do
   az account set --subscription "$(sub_for_env "$ENV")"
+  IDS="$(stack_ids "$ENV")"
+  NET_RG="$(rg_of "$ENV" networking)"
+  KV_RG="$(rg_of "$ENV" keyvault)"
 
-  for STACK in "${STACKS[@]}"; do
-    RG="$(rg_for "$ENV" "$STACK")"
-    echo "── $ENV / $STACK ($RG)"
+  for ID in $IDS; do
+    RG="$(rg_of "$ENV" "$ID")"
+    echo "── $ENV / $ID ($RG)"
+    ensure_rg "$ENV" "$RG" "$ID"
 
-    # A resource group must exist before it can be an RBAC scope.
-    az group create --name "$RG" --location "$LOCATION" \
-      --tags environment="$ENV" stack="$STACK" managed-by=terraform --output none
-
-    grant "$(sp "$ENV" "$STACK" plan)"  "Reader"      "$(rg_scope "$ENV" "$STACK")"
-    grant "$(sp "$ENV" "$STACK" apply)" "Contributor" "$(rg_scope "$ENV" "$STACK")"
-
+    grant "$(sp "$ENV" "$ID" plan)"  "Reader"      "$(rg_scope "$ENV" "$RG")"
+    grant "$(sp "$ENV" "$ID" apply)" "Contributor" "$(rg_scope "$ENV" "$RG")"
     for KIND in plan apply; do
-      grant "$(sp "$ENV" "$STACK" "$KIND")" "Storage Blob Data Contributor" "$(container_scope "$ENV" "$STACK")"
+      grant "$(sp "$ENV" "$ID" "$KIND")" "Storage Blob Data Contributor" "$(container_scope "$ENV" "$ID")"
     done
-
     if [ "$NEEDS_RBAC_WRITE" = "true" ]; then
-      grant "$(sp "$ENV" "$STACK" apply)" "User Access Administrator" "$(rg_scope "$ENV" "$STACK")"
+      grant "$(sp "$ENV" "$ID" apply)" "User Access Administrator" "$(rg_scope "$ENV" "$RG")"
+    fi
+
+    is_shared "$ID" && continue
+
+    # Workload defaults: consume the shared VNet and vault.
+    for KIND in plan apply; do
+      W="$(sp "$ENV" "$ID" "$KIND")"
+      grant "$W" "Storage Blob Data Reader" "$(container_scope "$ENV" networking)"
+      grant "$W" "Storage Blob Data Reader" "$(container_scope "$ENV" keyvault)"
+      grant "$W" "Reader"                   "$(rg_scope "$ENV" "$KV_RG")"
+    done
+    grant "$(sp "$ENV" "$ID" plan)"  "Key Vault Secrets User"    "$(rg_scope "$ENV" "$KV_RG")"
+    grant "$(sp "$ENV" "$ID" apply)" "Key Vault Secrets Officer" "$(rg_scope "$ENV" "$KV_RG")"
+    grant "$(sp "$ENV" "$ID" apply)" "$SUBNET_JOIN_ROLE"         "$(rg_scope "$ENV" "$NET_RG")"
+    if [ "$NEEDS_RBAC_WRITE" = "true" ]; then
+      grant "$(sp "$ENV" "$ID" apply)" "User Access Administrator" "$(rg_scope "$ENV" "$KV_RG")"
     fi
   done
-
-  # ── app stack cross-stack grants ───────────────────────────────────────────
-  echo "── $ENV / app cross-stack"
-  KV_RG_SCOPE="$(rg_scope "$ENV" keyvault)"
-  for KIND in plan apply; do
-    APP_SP="$(sp "$ENV" app "$KIND")"
-    grant "$APP_SP" "Storage Blob Data Reader" "$(container_scope "$ENV" networking)"
-    grant "$APP_SP" "Storage Blob Data Reader" "$(container_scope "$ENV" keyvault)"
-    grant "$APP_SP" "Reader"                   "$KV_RG_SCOPE"
-  done
-  grant "$(sp "$ENV" app plan)"  "Key Vault Secrets User"    "$KV_RG_SCOPE"
-  grant "$(sp "$ENV" app apply)" "Key Vault Secrets Officer" "$KV_RG_SCOPE"
-  grant "$(sp "$ENV" app apply)" "$SUBNET_JOIN_ROLE"         "$(rg_scope "$ENV" networking)"
-
-  # The module's optional VM role assignment targets the vault in rg-keyvault.
-  if [ "$NEEDS_RBAC_WRITE" = "true" ]; then
-    grant "$(sp "$ENV" app apply)" "User Access Administrator" "$KV_RG_SCOPE"
-  fi
 done
 
 echo "RBAC complete. Role assignments can take a few minutes to propagate."

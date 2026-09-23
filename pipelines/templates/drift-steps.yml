@@ -1,12 +1,12 @@
-# ══════════════════════════════════════════════════════════════════════════════
-# TEMPLATE: drift check one stack (read only, uses the *-plan connection).
+# TEMPLATE: drift check one stack. Read only, *-plan connection.
 #   exit 0 = matches code   exit 1 = error   exit 2 = drift
-# ══════════════════════════════════════════════════════════════════════════════
 
 parameters:
   - name: environmentName
     type: string
-  - name: stack
+  - name: stackPath        # shared/networking | shared/keyvault | rg/<resource-group>
+    type: string
+  - name: stackId          # networking | keyvault | lowercased RG name
     type: string
 
 steps:
@@ -16,12 +16,12 @@ steps:
       terraformVersion: $(TF_VERSION)
 
   - task: AzureCLI@2
-    displayName: 'Drift check ${{ parameters.environmentName }}/${{ parameters.stack }}'
+    displayName: 'Drift check ${{ parameters.environmentName }}/${{ parameters.stackPath }}'
     inputs:
-      azureSubscription: 'SVC-TF-${{ parameters.environmentName }}-${{ parameters.stack }}-plan'
+      azureSubscription: 'SVC-TF-${{ parameters.environmentName }}-${{ parameters.stackId }}-plan'
       scriptType: bash
       scriptLocation: inlineScript
-      workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}'
+      workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stackPath }}'
       addSpnToEnvironment: true
       inlineScript: |
         set -euo pipefail
@@ -34,34 +34,32 @@ steps:
         export ARM_TENANT_ID="$tenantId"
         export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
 
-        # use_azuread_auth: the state accounts have shared key access disabled,
-        # so the backend must authenticate with Entra ID, not account keys.
+        # Shared key access is disabled on the state accounts, so the backend
+        # authenticates with Entra ID (use_azuread_auth).
         terraform init -input=false \
           -backend-config="resource_group_name=$(STATE_RG)" \
           -backend-config="storage_account_name=tfstate${{ parameters.environmentName }}001" \
-          -backend-config="container_name=tfstate-${{ parameters.stack }}" \
+          -backend-config="container_name=tfstate-${{ parameters.stackId }}" \
           -backend-config="key=terraform.tfstate" \
           -backend-config="use_oidc=true" \
           -backend-config="use_azuread_auth=true"
 
-        # set -e would abort on exit code 2, so capture it explicitly.
         set +e
         terraform plan -input=false -lock=false -detailed-exitcode -no-color > drift.txt 2>&1
         CODE=$?
         set -e
         cat drift.txt
-
         if [ "$CODE" -eq 0 ]; then
-          echo "No drift: Azure matches the code."
+          echo "No drift."
         elif [ "$CODE" -eq 2 ]; then
-          echo "##vso[task.logissue type=error]Drift detected in ${{ parameters.environmentName }}/${{ parameters.stack }}."
+          echo "##vso[task.logissue type=error]Drift detected in ${{ parameters.environmentName }}/${{ parameters.stackPath }}."
           exit 1
         else
           echo "##vso[task.logissue type=error]terraform plan errored (exit $CODE)."
           exit "$CODE"
         fi
 
-  - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}/drift.txt'
-    artifact: 'drift-${{ parameters.environmentName }}-${{ parameters.stack }}-$(System.JobAttempt)'
+  - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stackPath }}/drift.txt'
+    artifact: 'drift-${{ parameters.environmentName }}-${{ parameters.stackId }}-$(System.JobAttempt)'
     displayName: 'Publish drift report'
     condition: always()

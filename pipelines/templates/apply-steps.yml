@@ -1,13 +1,12 @@
-# ══════════════════════════════════════════════════════════════════════════════
-# TEMPLATE: apply one stack in one environment (CD).
-# Inside the approval gate: init, fresh plan, apply exactly that saved plan.
-# Uses the *-apply service connection: Contributor on the resource group.
-# ══════════════════════════════════════════════════════════════════════════════
+# TEMPLATE: apply one stack (CD). Fresh plan inside the approval gate, then
+# apply exactly that saved plan. Uses the *-apply connection.
 
 parameters:
   - name: environmentName
     type: string
-  - name: stack
+  - name: stackPath        # shared/networking | shared/keyvault | rg/<resource-group>
+    type: string
+  - name: stackId          # networking | keyvault | lowercased RG name
     type: string
 
 steps:
@@ -19,12 +18,12 @@ steps:
       terraformVersion: $(TF_VERSION)
 
   - task: AzureCLI@2
-    displayName: 'Apply ${{ parameters.environmentName }}/${{ parameters.stack }}'
+    displayName: 'Apply ${{ parameters.environmentName }}/${{ parameters.stackPath }}'
     inputs:
-      azureSubscription: 'SVC-TF-${{ parameters.environmentName }}-${{ parameters.stack }}-apply'
+      azureSubscription: 'SVC-TF-${{ parameters.environmentName }}-${{ parameters.stackId }}-apply'
       scriptType: bash
       scriptLocation: inlineScript
-      workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}'
+      workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stackPath }}'
       addSpnToEnvironment: true
       inlineScript: |
         set -euo pipefail
@@ -37,28 +36,25 @@ steps:
         export ARM_TENANT_ID="$tenantId"
         export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
 
-        # use_azuread_auth: the state accounts have shared key access disabled,
-        # so the backend must authenticate with Entra ID, not account keys.
+        # Shared key access is disabled on the state accounts, so the backend
+        # authenticates with Entra ID (use_azuread_auth).
         terraform init -input=false \
           -backend-config="resource_group_name=$(STATE_RG)" \
           -backend-config="storage_account_name=tfstate${{ parameters.environmentName }}001" \
-          -backend-config="container_name=tfstate-${{ parameters.stack }}" \
+          -backend-config="container_name=tfstate-${{ parameters.stackId }}" \
           -backend-config="key=terraform.tfstate" \
           -backend-config="use_oidc=true" \
           -backend-config="use_azuread_auth=true"
 
-        # State lock IS taken. -lock-timeout waits for a held lock instead of
-        # failing instantly.
         terraform plan -input=false -lock-timeout=5m -out=apply.binary
         terraform show -no-color apply.binary > applied-plan.txt
         cat applied-plan.txt
 
-        # A saved plan file is already an approved decision: no -auto-approve.
+        # A saved plan is already an approved decision: no -auto-approve.
         terraform apply -input=false -lock-timeout=5m apply.binary
 
-  # Audit evidence referenced by the change record.
-  - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}/applied-plan.txt'
-    artifact: 'applied-${{ parameters.environmentName }}-${{ parameters.stack }}-$(System.JobAttempt)'
+  - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stackPath }}/applied-plan.txt'
+    artifact: 'applied-${{ parameters.environmentName }}-${{ parameters.stackId }}-$(System.JobAttempt)'
     displayName: 'Publish applied plan (audit evidence)'
     condition: always()
 

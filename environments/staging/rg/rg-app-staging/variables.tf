@@ -1,6 +1,6 @@
 variable "resource_group_name" {
   type        = string
-  description = "Resource group for this stack."
+  description = "Resource group. Must equal this folder's name (enforced in CI)."
 }
 
 variable "location" {

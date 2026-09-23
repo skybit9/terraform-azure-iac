@@ -23,9 +23,9 @@ registrations, role assignments, and a custom role in all four subscriptions.
 | 3 | terminal | `./01-state-backend.sh` |
 | 4 | terminal | `./02-identities.sh` |
 | 5 | terminal | `./03-rbac.sh` |
-| 6 | Azure DevOps | Create **18 service connections**: Azure Resource Manager, Workload identity federation (manual), named exactly `SVC-TF-<env>-<stack>-<plan\|apply>`, each scoped to its environment's subscription |
+| 6 | Azure DevOps | Create **2 service connections per stack per environment** (18 for the starting layout): Azure Resource Manager, Workload identity federation (manual), named exactly `SVC-TF-<env>-<stack id>-<plan\|apply>` where stack id is `networking`, `keyvault`, or the lowercased RG name. Each scoped to its environment's subscription |
 | 7 | terminal | `./04-federated-credentials.sh` |
-| 8 | Azure DevOps | **Verify and save** each of the 18 service connections |
+| 8 | Azure DevOps | **Verify and save** each service connection |
 | 9 | terminal | `./05-providers.sh` |
 | 10 | terminal | `./99-verify.sh`. Do not continue until it passes |
 
@@ -42,7 +42,7 @@ registrations, role assignments, and a custom role in all four subscriptions.
 
 | Step | Action | Expect |
 |---|---|---|
-| 15 | Run **cd-apply** manually, or merge any change under `environments/` | Approve `dev`; networking, keyvault, app apply in order |
+| 15 | Run **cd-apply** manually, or merge any change under `environments/` | Approve `dev`; shared/networking, shared/keyvault, then workload RGs |
 | 16 | Approve `staging`, then `prod` | Same order in each |
 | 17 | Next morning | **drift-detection** runs green |
 
@@ -59,26 +59,30 @@ state to read yet. This happens only the first time.
 
 ### Kept in sync by hand
 
-These values live in more than one place and nothing links them.
-
 | Value | Defined in | Must match |
 |---|---|---|
-| State storage account names `tfstate<env>001` | `sa_for_env()` in `00-variables.sh` | `pipelines/templates/*.yml` and `state_storage_account` in `environments/*/app/terraform.tfvars` |
-| Resource group names `rg-<stack>-<env>` | `rg_for()` in `00-variables.sh` (created by `03-rbac.sh`) | `resource_group_name` in each `environments/*/*/terraform.tfvars` |
-| Service connection names | `04-federated-credentials.sh` | Azure DevOps connection names and `pipelines/templates/*.yml` |
+| Workload RG list | `environments/<env>/rg/` folders (read by bootstrap) | `workloads` in `pipelines/templates/environments.yml`. **CI enforces** |
+| State storage account names `tfstate<env>001` | `sa_for_env()` in `bootstrap/00-variables.sh` | `pipelines/templates/*-steps.yml` and `state_storage_account` in every workload `terraform.tfvars` |
+| Service connection names | `04-federated-credentials.sh` prints them | Azure DevOps connection names |
 
 If a storage account name is taken globally, bump `001` to `002` in **all**
-three places.
+places in the second row.
 
 ## Layout
 
 ```
-modules/linux-vm/          reusable module, consumed by git tag
-environments/<env>/<stack> one root module per environment and stack
-pipelines/                 CI (plan), CD (apply), nightly drift detection
-bootstrap/                 one-time Azure and Azure DevOps prerequisites
-.checkov.yaml              policy scan config with every exception justified
-.tflint.hcl                lint rules
+modules/linux-vm/                       reusable module, consumed by git tag
+environments/<env>/
+├── shared/
+│   ├── networking/                     one VNet per environment
+│   └── keyvault/                       one Key Vault per environment
+└── rg/
+    └── <resource-group-name>/          one folder per workload RG; folder name = RG name
+pipelines/
+├── ci-plan.yml | cd-apply.yml | drift-detection.yml
+└── templates/environments.yml          THE list of environments and workload RGs
+bootstrap/                              one-time Azure and Azure DevOps prerequisites
+.checkov.yaml | .tflint.hcl
 ```
 
 ## State topology
@@ -86,34 +90,78 @@ bootstrap/                 one-time Azure and Azure DevOps prerequisites
 ```
 MANAGEMENT SUBSCRIPTION
 └── rg-terraform-state
-    ├── tfstatedev001       tfstate-networking | tfstate-keyvault | tfstate-app
-    ├── tfstatestaging001   same three containers
-    └── tfstateprod001      same three containers
+    ├── tfstatedev001       tfstate-networking | tfstate-keyvault | tfstate-<each dev RG>
+    ├── tfstatestaging001   same pattern
+    └── tfstateprod001      same pattern
 ```
 
 - **State lives outside the subscriptions it describes.** Deleting or moving a
   workload subscription must not destroy the state that manages it.
 - **One container per stack.** A container is an RBAC scope; a blob key is not.
-  Each stack's identities can reach only their own container.
+  Each stack's identities can reach only their own container (workloads also
+  get read on the two shared containers).
 - **Shared key access is disabled** on every state account, so the backend
   authenticates with Entra ID (`use_azuread_auth = true`).
 
 ## Stacks
 
-| Stack | Resource group | Contains | Read by |
+| Kind | Folder | Resource group | State container |
 |---|---|---|---|
-| `networking` | `rg-networking-<env>` | VNet, subnet, subnet NSG | app |
-| `keyvault` | `rg-keyvault-<env>` | Key Vault (RBAC mode) | app |
-| `app` | `rg-app-<env>` | VMs from `modules/linux-vm` | |
+| shared | `shared/networking` | `rg-networking-<env>` | `tfstate-networking` |
+| shared | `shared/keyvault` | `rg-keyvault-<env>` | `tfstate-keyvault` |
+| workload | `rg/<rg-name>` | `<rg-name>` exactly | `tfstate-<lowercased rg-name>` |
 
-The app stack reads the others through `terraform_remote_state`, so **apply
-order is networking, keyvault, app**. On a brand new environment the first CI
-plan of the app stack fails until networking and keyvault have been applied
-once; that is expected.
+**Networking and Key Vault are shared by every workload RG in an
+environment.** A new workload RG never gets its own VNet or vault; it reads the
+shared ones through `terraform_remote_state`.
+
+Apply order per environment: `shared/networking`, `shared/keyvault`, then all
+workload RGs in parallel. On a brand new environment, workload CI plans fail
+until the shared stacks have been applied once; that is expected.
+
+## Adding a workload resource group
+
+1. `mkdir environments/<env>/rg/<rg-name>` and copy `backend.tf`,
+   `providers.tf`, `versions.tf` from an existing workload
+2. Write the Terraform (or import, below). `resource_group_name` in its
+   `terraform.tfvars` must equal the folder name
+3. Add `<rg-name>` to that environment's `workloads` in
+   `pipelines/templates/environments.yml`
+4. Bootstrap: rerun `01` to `04`, then create its two service connections
+   `SVC-TF-<env>-<lowercased rg-name>-plan` and `-apply`
+5. PR, CI, merge, CD
+
+CI fails if step 3 is forgotten, if an extra entry has no folder, or if the
+folder name and `resource_group_name` differ.
+
+Lowercased RG names must be 3 to 55 characters of `a-z`, `0-9`, and single
+hyphens, because they become state container names. Bootstrap and CI both
+reject anything else.
+
+## Bringing an existing resource group under Terraform
+
+Same as above, with the code generated from Azure instead of written:
+
+```bash
+cd environments/dev/rg/<existing-rg-name>
+aztfexport resource-group <existing-rg-name> \
+  --hcl-only --generate-import-block --non-interactive --output-dir ./export
+mv export/main.tf main.tf && mv export/import.tf import.tf && rm -rf export
+terraform init -backend=false && terraform plan
+```
+
+`--hcl-only` writes no state: state is only ever written by CD, through the
+approval gate. Reconcile the HCL until the plan reads **N to import, 0 to add,
+0 to change, 0 to destroy**, then continue from step 3 above. After CD applies,
+remove `import.tf` in a follow-up PR and remove human write access on the RG.
+
+Bootstrap never modifies an existing resource group: `az group create` on an
+existing group replaces its tags, which would show as drift immediately after
+import, so groups are only created when missing.
 
 ## Adding or removing a VM
 
-VMs are defined in `locals` in `environments/<env>/app/main.tf`:
+VMs are defined in `locals` in `environments/<env>/rg/rg-app-<env>/main.tf`:
 
 ```hcl
 locals {
@@ -146,12 +194,15 @@ tag is a moving target.
 
 ## Identities
 
-18 service principals: 3 environments x 3 stacks x {plan, apply}. No client
-secrets: authentication is workload identity federation.
+Two service principals per stack per environment, `plan` and `apply`
+(18 for the starting layout). No client secrets: authentication is workload
+identity federation.
 
 - `plan` holds **Reader**. CI runs on every pull request, so a PR that adds an
   apply step to the YAML still cannot change Azure.
 - `apply` holds **Contributor** on its own resource group only.
+- Workload identities also get read access to the shared networking and
+  keyvault state, Key Vault secrets roles, and subnet join on the shared VNet.
 
 Every grant and its reason: `bootstrap/README.md`.
 
@@ -159,9 +210,9 @@ Every grant and its reason: `bootstrap/README.md`.
 
 | Pipeline | Trigger | Does |
 |---|---|---|
-| `ci-plan.yml` | PR into `main` | fmt, validate, tflint, then plan + Checkov for all 9 stacks in parallel. Never applies |
-| `cd-apply.yml` | merge to `main` | per environment: **one approval**, then networking, keyvault, app in order. Fresh plan inside the gate, then applies exactly that saved plan |
-| `drift-detection.yml` | nightly | read-only plan of prod stacks; exit code 2 fails the run |
+| `ci-plan.yml` | PR into `main` | fmt, config-matches-folders check, validate, tflint, then plan + Checkov for every stack in parallel. Never applies |
+| `cd-apply.yml` | merge to `main` | per environment: **one approval**, then shared/networking, shared/keyvault, then all workload RGs in parallel. Fresh plan inside the gate, then applies exactly that saved plan |
+| `drift-detection.yml` | nightly | read-only plan of every stack in `driftEnvironments` (prod); exit code 2 fails the run |
 
 Optional: a secret pipeline variable `GITHUB_TOKEN` (GitHub PAT, no scopes)
 lifts GitHub's unauthenticated rate limit for the tflint ruleset download.

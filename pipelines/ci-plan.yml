@@ -1,8 +1,7 @@
-# ══════════════════════════════════════════════════════════════════════════════
-# CI: dry run. Plans every stack in every environment. NEVER applies.
-#   feature/* -> PR into main -> this pipeline
-#   main      -> merge        -> cd-apply.yml
-# ══════════════════════════════════════════════════════════════════════════════
+# CI: dry run on every PR into main. Plans every stack. Never applies.
+# Environments and workload RGs: templates/environments.yml
+# (In Azure Repos, PR validation comes from the branch policy; the pr: block
+# below applies when the repo is hosted on GitHub.)
 
 name: 'CI-Plan-$(Date:yyyyMMdd)$(Rev:.r)'
 
@@ -14,74 +13,12 @@ pr:
   paths:
     include: [environments, modules, pipelines, .checkov.yaml, .tflint.hcl]
 
-parameters:
-  - name: environments
-    type: object
-    default: [dev, staging, prod]
-  - name: stacks
-    type: object
-    default: [networking, keyvault, app]
-
 variables:
   TF_VERSION: '1.16.3'
   STATE_RG: 'rg-terraform-state'
   TF_IN_AUTOMATION: 'true'
 
 stages:
-  - stage: Validate
-    displayName: 'Validate'
-    jobs:
-      - job: Static
-        pool: {vmImage: ubuntu-latest}
-        steps:
-          - task: TerraformInstaller@1
-            inputs: {terraformVersion: $(TF_VERSION)}
-
-          - script: terraform fmt -check -recursive -diff
-            displayName: 'Format check'
-
-          - ${{ each env in parameters.environments }}:
-              - ${{ each stack in parameters.stacks }}:
-                  - script: |
-                      set -euo pipefail
-                      terraform init -backend=false -input=false
-                      terraform validate
-                    displayName: 'Validate ${{ env }}/${{ stack }}'
-                    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ env }}/${{ stack }}'
-
-          # tflint downloads the azurerm ruleset from GitHub. Unauthenticated
-          # works but GitHub allows 60 requests/hour per IP, and hosted agents
-          # share IPs. Optional fix: add a secret pipeline variable named
-          # GITHUB_TOKEN (a GitHub PAT with no scopes). Not the Azure DevOps
-          # System.AccessToken: GitHub rejects that with 401.
-          - script: |
-              set -euo pipefail
-              # An undefined variable arrives as the literal text $(GITHUB_TOKEN);
-              # only export a real value, otherwise GitHub returns 401.
-              case "${GH_TOKEN_MAPPED:-}" in
-                ""|'$(GITHUB_TOKEN)') unset GITHUB_TOKEN; echo "tflint: unauthenticated GitHub access" ;;
-                *) export GITHUB_TOKEN="$GH_TOKEN_MAPPED"; echo "tflint: using GITHUB_TOKEN" ;;
-              esac
-              curl -sSL https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
-              tflint --init --config "$(Build.SourcesDirectory)/.tflint.hcl"
-              tflint --recursive --config "$(Build.SourcesDirectory)/.tflint.hcl" --format compact
-            displayName: 'TFLint'
-            env:
-              GH_TOKEN_MAPPED: $(GITHUB_TOKEN)
-
-  # Plans are read only and each stack has its own state container, so every
-  # environment and stack plans in parallel.
-  - ${{ each env in parameters.environments }}:
-      - stage: Plan_${{ env }}
-        displayName: 'Plan: ${{ env }}'
-        dependsOn: Validate
-        jobs:
-          - ${{ each stack in parameters.stacks }}:
-              - job: ${{ stack }}
-                displayName: '${{ stack }}'
-                pool: {vmImage: ubuntu-latest}
-                steps:
-                  - template: templates/plan-steps.yml
-                    parameters:
-                      environmentName: ${{ env }}
-                      stack: ${{ stack }}
+  - template: templates/environments.yml
+    parameters:
+      mode: ci

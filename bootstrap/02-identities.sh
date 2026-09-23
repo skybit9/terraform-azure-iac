@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════════════
-# 02: SERVICE PRINCIPALS
-# 3 environments x 3 stacks x {plan, apply} = 18 identities.
-#   plan  : read only, used by CI on every pull request
-#   apply : write, used by CD after approval
-# A PR that adds an apply step to the YAML still cannot change Azure, because
-# the CI connection only holds Reader. No client secrets are created.
+# 02: SERVICE PRINCIPALS. Two per stack per environment:
+#   sp-tf-<env>-<stack id>-plan   read only, CI on every pull request
+#   sp-tf-<env>-<stack id>-apply  write, CD after approval
+# Idempotent: existing identities are reused. No client secrets are created.
 # ══════════════════════════════════════════════════════════════════════════════
 # shellcheck source=bootstrap/00-variables.sh
 source "$(dirname "$0")/00-variables.sh"
@@ -14,11 +12,10 @@ OUT="$(dirname "$0")/identities.env"
 : > "$OUT"
 
 for ENV in "${ENVIRONMENTS[@]}"; do
-  for STACK in "${STACKS[@]}"; do
+  IDS="$(stack_ids "$ENV")"
+  for ID in $IDS; do
     for KIND in plan apply; do
-      NAME="sp-tf-${ENV}-${STACK}-${KIND}"
-
-      # Reuse if it already exists, so the script is re-runnable.
+      NAME="sp-tf-${ENV}-${ID}-${KIND}"
       APP_ID="$(az ad app list --display-name "$NAME" --query '[0].appId' -o tsv)"
       if [ -z "$APP_ID" ]; then
         APP_ID="$(az ad app create --display-name "$NAME" --query appId -o tsv)"
@@ -27,7 +24,7 @@ for ENV in "${ENVIRONMENTS[@]}"; do
         || az ad sp create --id "$APP_ID" --output none
       SP_OBJ="$(az ad sp show --id "$APP_ID" --query id -o tsv)"
 
-      KEY="$(id_key "$ENV" "$STACK" "$KIND")"
+      KEY="$(id_key "$ENV" "$ID" "$KIND")"
       printf 'APPID_%s="%s"\nSPOBJ_%s="%s"\n' "$KEY" "$APP_ID" "$KEY" "$SP_OBJ" >> "$OUT"
       echo "$NAME  $APP_ID"
     done

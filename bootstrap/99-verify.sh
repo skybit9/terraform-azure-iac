@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════════════
-# 99: VERIFY. Run after 01 to 05 so a pipeline failure points at the pipeline,
-# not at missing setup. Exits non-zero if anything is missing.
+# 99: VERIFY. Run after 01 to 05. Exits non-zero if anything is missing.
 # ══════════════════════════════════════════════════════════════════════════════
 # shellcheck source=bootstrap/00-variables.sh
 source "$(dirname "$0")/00-variables.sh"
@@ -30,6 +29,9 @@ has_role() {                                # <principal> <role> <scope>
   [ "${n:-0}" -gt 0 ]
 }
 
+spobj() { local v; v="SPOBJ_$(id_key "$1" "$2" "$3")"; echo "${!v}"; }
+appid() { local v; v="APPID_$(id_key "$1" "$2" "$3")"; echo "${!v}"; }
+
 echo "── State backend"
 az account set --subscription "$SUB_MGMT"
 for ENV in "${ENVIRONMENTS[@]}"; do
@@ -40,8 +42,8 @@ for ENV in "${ENVIRONMENTS[@]}"; do
     is_eq "$(az storage account show -n "$SA" -g "$STATE_RG" --query allowSharedKeyAccess -o tsv)" "false"
   check "  versioning on" "  versioning OFF on $SA" \
     is_eq "$(az storage account blob-service-properties show --account-name "$SA" -g "$STATE_RG" --query isVersioningEnabled -o tsv)" "true"
-  for STACK in "${STACKS[@]}"; do
-    C="$(container_for_stack "$STACK")"
+  for ID in $(stack_ids "$ENV"); do
+    C="$(container_for_stack "$ID")"
     check "  $C" "  $C missing" \
       exists az storage container show -n "$C" --account-name "$SA" --auth-mode login
   done
@@ -49,21 +51,23 @@ done
 
 echo "── Identities"
 for ENV in "${ENVIRONMENTS[@]}"; do
-  for STACK in "${STACKS[@]}"; do
+  NET_RG="$(rg_of "$ENV" networking)"
+  KV_RG="$(rg_of "$ENV" keyvault)"
+  for ID in $(stack_ids "$ENV"); do
     for KIND in plan apply; do
-      K="$(id_key "$ENV" "$STACK" "$KIND")"; A="APPID_$K"; S="SPOBJ_$K"
-      LABEL="sp-tf-$ENV-$STACK-$KIND"
-      check "$LABEL state access" "$LABEL MISSING state access (plan will 403)" \
-        has_role "${!S}" "Storage Blob Data Contributor" "$(container_scope "$ENV" "$STACK")"
-      check "$LABEL federated credential" "$LABEL no federated credential" \
-        [ "$(az ad app federated-credential list --id "${!A}" --query 'length(@)' -o tsv)" -gt 0 ]
+      L="sp-tf-$ENV-$ID-$KIND"
+      check "$L state access" "$L MISSING state access (plan will 403)" \
+        has_role "$(spobj "$ENV" "$ID" "$KIND")" "Storage Blob Data Contributor" "$(container_scope "$ENV" "$ID")"
+      check "$L federated credential" "$L no federated credential" \
+        [ "$(az ad app federated-credential list --id "$(appid "$ENV" "$ID" "$KIND")" --query 'length(@)' -o tsv)" -gt 0 ]
     done
+    is_shared "$ID" && continue
+    A="$(spobj "$ENV" "$ID" apply)"
+    check "$ENV/$ID apply: Key Vault Secrets Officer" "$ENV/$ID apply cannot write secrets" \
+      has_role "$A" "Key Vault Secrets Officer" "$(rg_scope "$ENV" "$KV_RG")"
+    check "$ENV/$ID apply: subnet join" "$ENV/$ID apply cannot join subnet" \
+      has_role "$A" "$SUBNET_JOIN_ROLE" "$(rg_scope "$ENV" "$NET_RG")"
   done
-  APPLY_VAR="SPOBJ_$(id_key "$ENV" app apply)"; APP_APPLY="${!APPLY_VAR}"
-  check "$ENV app-apply Key Vault Secrets Officer" "$ENV app-apply cannot write VM secrets" \
-    has_role "$APP_APPLY" "Key Vault Secrets Officer" "$(rg_scope "$ENV" keyvault)"
-  check "$ENV app-apply subnet join" "$ENV app-apply cannot join subnet" \
-    has_role "$APP_APPLY" "$SUBNET_JOIN_ROLE" "$(rg_scope "$ENV" networking)"
 done
 
 echo

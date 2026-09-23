@@ -1,4 +1,4 @@
-# ── STACK: keyvault (dev) ───────────────────────────────────────────────────
+# ── SHARED: keyvault (prod) ───────────────────────────────────────────────────
 
 data "azurerm_client_config" "current" {}
 

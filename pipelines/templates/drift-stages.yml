@@ -1,0 +1,33 @@
+# Drift stages: read only plan of every stack in the selected environments.
+parameters:
+  - name: environments
+    type: object
+  - name: driftEnvironments
+    type: object
+
+stages:
+  - ${{ each env in parameters.environments }}:
+      - ${{ if containsValue(parameters.driftEnvironments, env.name) }}:
+          - stage: Drift_${{ env.name }}
+            displayName: 'Drift: ${{ env.name }}'
+            dependsOn: []
+            jobs:
+              - job: shared_networking
+                pool: {vmImage: ubuntu-latest}
+                steps:
+                  - template: drift-steps.yml
+                    parameters: {environmentName: '${{ env.name }}', stackPath: shared/networking, stackId: networking}
+
+              - job: shared_keyvault
+                pool: {vmImage: ubuntu-latest}
+                steps:
+                  - template: drift-steps.yml
+                    parameters: {environmentName: '${{ env.name }}', stackPath: shared/keyvault, stackId: keyvault}
+
+              - ${{ each rg in env.workloads }}:
+                  - job: wl_${{ replace(lower(rg), '-', '_') }}
+                    displayName: 'rg/${{ rg }}'
+                    pool: {vmImage: ubuntu-latest}
+                    steps:
+                      - template: drift-steps.yml
+                        parameters: {environmentName: '${{ env.name }}', stackPath: 'rg/${{ rg }}', stackId: '${{ lower(rg) }}'}

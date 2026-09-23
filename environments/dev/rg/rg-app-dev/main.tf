@@ -1,6 +1,7 @@
-# ── STACK: app (staging) ────────────────────────────────────────────────────────
-# Reads networking and keyvault outputs from their state containers. The app
-# pipeline identities hold Storage Blob Data READER on those two containers.
+# ── WORKLOAD: rg-app-dev ────────────────────────────────────────────────────────
+# Folder name = resource group name. Reads the environment's SHARED networking
+# and keyvault outputs from their state containers; this workload's pipeline
+# identities hold Storage Blob Data READER on those two containers only.
 
 data "terraform_remote_state" "networking" {
   backend = "azurerm"
@@ -31,10 +32,10 @@ data "terraform_remote_state" "keyvault" {
 # destroys the VM and creates a new one.
 locals {
   vms = {
-    "vm-app-staging-01" = {
-      vm_size         = "Standard_D2s_v3"
-      os_disk_size_gb = 128
-      os_disk_type    = "Premium_LRS"
+    "vm-app-dev-01" = {
+      vm_size         = "Standard_B2s"
+      os_disk_size_gb = 64
+      os_disk_type    = "StandardSSD_LRS"
     }
   }
 }

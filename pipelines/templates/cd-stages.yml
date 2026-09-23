@@ -1,0 +1,48 @@
+# CD stages. One stage per environment = ONE approval per environment.
+# Inside: shared/networking, then shared/keyvault, then every workload RG in
+# parallel (workloads read the shared stacks through terraform_remote_state).
+parameters:
+  - name: environments
+    type: object
+
+stages:
+  - ${{ each env in parameters.environments }}:
+      - stage: ${{ env.name }}
+        displayName: 'Apply: ${{ env.name }}'
+        dependsOn: ${{ env.dependsOn }}
+        jobs:
+          - deployment: shared_networking
+            displayName: 'shared/networking'
+            environment: 'terraform-${{ env.name }}'
+            pool: {vmImage: ubuntu-latest}
+            strategy:
+              runOnce:
+                deploy:
+                  steps:
+                    - template: apply-steps.yml
+                      parameters: {environmentName: '${{ env.name }}', stackPath: shared/networking, stackId: networking}
+
+          - deployment: shared_keyvault
+            displayName: 'shared/keyvault'
+            dependsOn: shared_networking
+            environment: 'terraform-${{ env.name }}'
+            pool: {vmImage: ubuntu-latest}
+            strategy:
+              runOnce:
+                deploy:
+                  steps:
+                    - template: apply-steps.yml
+                      parameters: {environmentName: '${{ env.name }}', stackPath: shared/keyvault, stackId: keyvault}
+
+          - ${{ each rg in env.workloads }}:
+              - deployment: wl_${{ replace(lower(rg), '-', '_') }}
+                displayName: 'rg/${{ rg }}'
+                dependsOn: shared_keyvault
+                environment: 'terraform-${{ env.name }}'
+                pool: {vmImage: ubuntu-latest}
+                strategy:
+                  runOnce:
+                    deploy:
+                      steps:
+                        - template: apply-steps.yml
+                          parameters: {environmentName: '${{ env.name }}', stackPath: 'rg/${{ rg }}', stackId: '${{ lower(rg) }}'}

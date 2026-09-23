@@ -1,0 +1,53 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# SINGLE SOURCE OF TRUTH FOR THE PIPELINES: environments and their workload
+# resource groups. ci-plan, cd-apply, and drift-detection all render from here.
+#
+# ADDING A RESOURCE GROUP TO AN ENVIRONMENT
+#   1. create environments/<env>/rg/<resource-group-name>/
+#   2. add <resource-group-name> to that environment's workloads list below
+#   3. bootstrap: rerun 01-04 and create its 2 service connections
+# CI fails if this list and the rg/ folders disagree.
+#
+# Shared stacks (networking, keyvault) exist in every environment and are not
+# listed: they are fixed and always applied first.
+# ══════════════════════════════════════════════════════════════════════════════
+
+parameters:
+  - name: mode
+    type: string
+    values: [ci, cd, drift]
+
+  - name: environments
+    type: object
+    default:
+      - name: dev
+        dependsOn: []
+        workloads:
+          - rg-app-dev
+      - name: staging
+        dependsOn: [dev]
+        workloads:
+          - rg-app-staging
+      - name: prod
+        dependsOn: [staging]
+        workloads:
+          - rg-app-prod
+
+  - name: driftEnvironments
+    type: object
+    default: [prod]
+
+stages:
+  - ${{ if eq(parameters.mode, 'ci') }}:
+      - template: ci-stages.yml
+        parameters:
+          environments: ${{ parameters.environments }}
+  - ${{ if eq(parameters.mode, 'cd') }}:
+      - template: cd-stages.yml
+        parameters:
+          environments: ${{ parameters.environments }}
+  - ${{ if eq(parameters.mode, 'drift') }}:
+      - template: drift-stages.yml
+        parameters:
+          environments: ${{ parameters.environments }}
+          driftEnvironments: ${{ parameters.driftEnvironments }}

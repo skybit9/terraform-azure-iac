@@ -1,14 +1,14 @@
-resource_group_name = "rg-app-staging"
+resource_group_name = "rg-app-dev"
 location            = "canadacentral"
 
-nsg_allowed_ssh_source = "10.20.0.0/16"
+nsg_allowed_ssh_source = "10.10.0.0/16"
 
 state_resource_group  = "rg-terraform-state"
-state_storage_account = "tfstatestaging001"
+state_storage_account = "tfstatedev001"
 
 tags = {
-  environment = "staging"
-  stack       = "app"
+  environment = "development"
+  stack       = "rg-app-dev"
   cost-center = "platform-engineering"
   owner       = "cloud-team"
   managed-by  = "terraform"

@@ -1,6 +1,7 @@
-# ── STACK: app (prod) ────────────────────────────────────────────────────────
-# Reads networking and keyvault outputs from their state containers. The app
-# pipeline identities hold Storage Blob Data READER on those two containers.
+# ── WORKLOAD: rg-app-prod ───────────────────────────────────────────────────────
+# Folder name = resource group name. Reads the environment's SHARED networking
+# and keyvault outputs from their state containers; this workload's pipeline
+# identities hold Storage Blob Data READER on those two containers only.
 
 data "terraform_remote_state" "networking" {
   backend = "azurerm"

@@ -8,7 +8,7 @@ state_storage_account = "tfstateprod001"
 
 tags = {
   environment = "production"
-  stack       = "app"
+  stack       = "rg-app-prod"
   cost-center = "platform-engineering"
   owner       = "cloud-team"
   managed-by  = "terraform"

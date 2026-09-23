@@ -1,9 +1,5 @@
-# ══════════════════════════════════════════════════════════════════════════════
-# DRIFT DETECTION: nightly, read only, all production stacks.
-# Catches portal and CLI changes that bypassed the pipeline. A failed run is
-# the alert; wire the pipeline's failure notification to the team channel or
-# to change management.
-# ══════════════════════════════════════════════════════════════════════════════
+# DRIFT DETECTION: nightly read only plan. A failed run is the alert.
+# Which environments: driftEnvironments in templates/environments.yml
 
 name: 'Drift-$(Date:yyyyMMdd)$(Rev:.r)'
 
@@ -15,15 +11,7 @@ schedules:
     displayName: 'Nightly drift check'
     branches:
       include: [main]
-    always: true               # run even when nothing was committed
-
-parameters:
-  - name: environments
-    type: object
-    default: [prod]
-  - name: stacks
-    type: object
-    default: [networking, keyvault, app]
+    always: true
 
 variables:
   TF_VERSION: '1.16.3'
@@ -31,15 +19,6 @@ variables:
   TF_IN_AUTOMATION: 'true'
 
 stages:
-  - ${{ each env in parameters.environments }}:
-      - stage: Drift_${{ env }}
-        displayName: 'Drift: ${{ env }}'
-        jobs:
-          - ${{ each stack in parameters.stacks }}:
-              - job: ${{ stack }}
-                pool: {vmImage: ubuntu-latest}
-                steps:
-                  - template: templates/drift-steps.yml
-                    parameters:
-                      environmentName: ${{ env }}
-                      stack: ${{ stack }}
+  - template: templates/environments.yml
+    parameters:
+      mode: drift

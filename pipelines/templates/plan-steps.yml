@@ -1,12 +1,11 @@
-# ══════════════════════════════════════════════════════════════════════════════
-# TEMPLATE: plan one stack in one environment (CI). Never applies.
-# Uses the *-plan service connection: Reader on the resource group.
-# ══════════════════════════════════════════════════════════════════════════════
+# TEMPLATE: plan one stack (CI). Never applies. Uses the *-plan connection.
 
 parameters:
   - name: environmentName
     type: string
-  - name: stack
+  - name: stackPath        # shared/networking | shared/keyvault | rg/<resource-group>
+    type: string
+  - name: stackId          # networking | keyvault | lowercased RG name
     type: string
 
 steps:
@@ -16,12 +15,12 @@ steps:
       terraformVersion: $(TF_VERSION)
 
   - task: AzureCLI@2
-    displayName: 'Plan ${{ parameters.environmentName }}/${{ parameters.stack }}'
+    displayName: 'Plan ${{ parameters.environmentName }}/${{ parameters.stackPath }}'
     inputs:
-      azureSubscription: 'SVC-TF-${{ parameters.environmentName }}-${{ parameters.stack }}-plan'
+      azureSubscription: 'SVC-TF-${{ parameters.environmentName }}-${{ parameters.stackId }}-plan'
       scriptType: bash
       scriptLocation: inlineScript
-      workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}'
+      workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stackPath }}'
       addSpnToEnvironment: true
       inlineScript: |
         set -euo pipefail
@@ -34,12 +33,12 @@ steps:
         export ARM_TENANT_ID="$tenantId"
         export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
 
-        # use_azuread_auth: the state accounts have shared key access disabled,
-        # so the backend must authenticate with Entra ID, not account keys.
+        # Shared key access is disabled on the state accounts, so the backend
+        # authenticates with Entra ID (use_azuread_auth).
         terraform init -input=false \
           -backend-config="resource_group_name=$(STATE_RG)" \
           -backend-config="storage_account_name=tfstate${{ parameters.environmentName }}001" \
-          -backend-config="container_name=tfstate-${{ parameters.stack }}" \
+          -backend-config="container_name=tfstate-${{ parameters.stackId }}" \
           -backend-config="key=terraform.tfstate" \
           -backend-config="use_oidc=true" \
           -backend-config="use_azuread_auth=true"
@@ -50,9 +49,8 @@ steps:
         terraform show -json tfplan.binary > tfplan.json
         terraform show -no-color tfplan.binary > tfplan.txt
 
-  # Scan the RESOLVED plan, not raw HCL: variables, locals, and module outputs
-  # are evaluated. Installed in a venv because ubuntu-latest marks the system
-  # Python as externally managed.
+  # Scan the RESOLVED plan. venv because ubuntu-latest's system Python is
+  # externally managed.
   - script: |
       set -euo pipefail
       python3 -m venv "$(Agent.TempDirectory)/checkov"
@@ -63,17 +61,17 @@ steps:
         --config-file "$(Build.SourcesDirectory)/.checkov.yaml" \
         --output cli --output junitxml \
         --output-file-path console,checkov.xml
-    displayName: 'Checkov ${{ parameters.environmentName }}/${{ parameters.stack }}'
-    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}'
+    displayName: 'Checkov ${{ parameters.environmentName }}/${{ parameters.stackPath }}'
+    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stackPath }}'
 
   - task: PublishTestResults@2
     displayName: 'Publish Checkov results'
     condition: always()
     inputs:
       testResultsFormat: JUnit
-      testResultsFiles: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}/checkov.xml'
-      testRunTitle: 'Checkov ${{ parameters.environmentName }}-${{ parameters.stack }}'
+      testResultsFiles: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stackPath }}/checkov.xml'
+      testRunTitle: 'Checkov ${{ parameters.environmentName }}-${{ parameters.stackId }}'
 
-  - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stack }}/tfplan.txt'
-    artifact: 'plan-${{ parameters.environmentName }}-${{ parameters.stack }}-$(System.JobAttempt)'
+  - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/${{ parameters.stackPath }}/tfplan.txt'
+    artifact: 'plan-${{ parameters.environmentName }}-${{ parameters.stackId }}-$(System.JobAttempt)'
     displayName: 'Publish plan for review'

@@ -1,0 +1,114 @@
+# CI stages: validate everything, then plan every stack of every environment
+# in parallel (plans are read only, every stack has its own state container).
+parameters:
+  - name: environments
+    type: object
+
+stages:
+  - stage: Validate
+    displayName: 'Validate'
+    jobs:
+      - job: Static
+        pool: {vmImage: ubuntu-latest}
+        steps:
+          - task: TerraformInstaller@1
+            inputs: {terraformVersion: $(TF_VERSION)}
+
+          - script: terraform fmt -check -recursive -diff
+            displayName: 'Format check'
+
+          - ${{ each env in parameters.environments }}:
+              # The workloads list in environments.yml must match the rg/
+              # folders exactly, and each folder's resource_group_name must
+              # equal the folder name.
+              - script: |
+                  set -euo pipefail
+                  cd "$(Build.SourcesDirectory)/environments/${{ env.name }}/rg"
+                  expected="$(echo '${{ join(' ', env.workloads) }}' | tr ' ' '\n' | sort)"
+                  actual="$(find . -mindepth 1 -maxdepth 1 -type d | sed 's|^\./||' | sort)"
+                  if [ "$expected" != "$actual" ]; then
+                    echo "##vso[task.logissue type=error]environments.yml workloads for ${{ env.name }} do not match rg/ folders"
+                    echo "config:";  echo "$expected"
+                    echo "folders:"; echo "$actual"
+                    exit 1
+                  fi
+                  for rg in $actual; do
+                    id="$(echo "$rg" | tr '[:upper:]' '[:lower:]')"
+                    if ! echo "$id" | grep -Eq '^[a-z0-9]([a-z0-9]|-[a-z0-9]){1,54}$'; then
+                      echo "##vso[task.logissue type=error]$rg: lowercased name must be 3-55 chars of a-z, 0-9, single hyphens (state container name)"
+                      exit 1
+                    fi
+                    grep -Eq "^resource_group_name *= *\"$rg\"" "$rg/terraform.tfvars" || {
+                      echo "##vso[task.logissue type=error]$rg/terraform.tfvars resource_group_name must be \"$rg\""
+                      exit 1
+                    }
+                  done
+                  echo "${{ env.name }}: config matches folders"
+                displayName: 'Config matches folders: ${{ env.name }}'
+
+              - script: |
+                  set -euo pipefail
+                  terraform init -backend=false -input=false
+                  terraform validate
+                displayName: 'Validate ${{ env.name }}/shared/networking'
+                workingDirectory: '$(Build.SourcesDirectory)/environments/${{ env.name }}/shared/networking'
+
+              - script: |
+                  set -euo pipefail
+                  terraform init -backend=false -input=false
+                  terraform validate
+                displayName: 'Validate ${{ env.name }}/shared/keyvault'
+                workingDirectory: '$(Build.SourcesDirectory)/environments/${{ env.name }}/shared/keyvault'
+
+              - ${{ each rg in env.workloads }}:
+                  - script: |
+                      set -euo pipefail
+                      terraform init -backend=false -input=false
+                      terraform validate
+                    displayName: 'Validate ${{ env.name }}/rg/${{ rg }}'
+                    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ env.name }}/rg/${{ rg }}'
+
+          # tflint downloads the azurerm ruleset from GitHub. Unauthenticated
+          # works but is rate limited (60/hour per IP, hosted agents share IPs).
+          # Optional: secret pipeline variable GITHUB_TOKEN (GitHub PAT, no
+          # scopes). Not the Azure DevOps System.AccessToken: GitHub rejects it.
+          - script: |
+              set -euo pipefail
+              # An undefined variable arrives as the literal text $(GITHUB_TOKEN).
+              case "${GH_TOKEN_MAPPED:-}" in
+                ""|'$(GITHUB_TOKEN)') unset GITHUB_TOKEN; echo "tflint: unauthenticated GitHub access" ;;
+                *) export GITHUB_TOKEN="$GH_TOKEN_MAPPED"; echo "tflint: using GITHUB_TOKEN" ;;
+              esac
+              curl -sSL https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+              tflint --init --config "$(Build.SourcesDirectory)/.tflint.hcl"
+              tflint --recursive --config "$(Build.SourcesDirectory)/.tflint.hcl" --format compact
+            displayName: 'TFLint'
+            env:
+              GH_TOKEN_MAPPED: $(GITHUB_TOKEN)
+
+  - ${{ each env in parameters.environments }}:
+      - stage: Plan_${{ env.name }}
+        displayName: 'Plan: ${{ env.name }}'
+        dependsOn: Validate
+        jobs:
+          - job: shared_networking
+            displayName: 'shared/networking'
+            pool: {vmImage: ubuntu-latest}
+            steps:
+              - template: plan-steps.yml
+                parameters: {environmentName: '${{ env.name }}', stackPath: shared/networking, stackId: networking}
+
+          - job: shared_keyvault
+            displayName: 'shared/keyvault'
+            pool: {vmImage: ubuntu-latest}
+            steps:
+              - template: plan-steps.yml
+                parameters: {environmentName: '${{ env.name }}', stackPath: shared/keyvault, stackId: keyvault}
+
+          - ${{ each rg in env.workloads }}:
+              - job: wl_${{ replace(lower(rg), '-', '_') }}
+                displayName: 'rg/${{ rg }}'
+                pool: {vmImage: ubuntu-latest}
+                steps:
+                  - template: plan-steps.yml
+                    parameters: {environmentName: '${{ env.name }}', stackPath: 'rg/${{ rg }}', stackId: '${{ lower(rg) }}'}
