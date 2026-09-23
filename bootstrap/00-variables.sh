@@ -23,6 +23,7 @@ set -euo pipefail
 
 # ── Edit these ────────────────────────────────────────────────────────────────
 export LOCATION="canadacentral"
+# Used in resource tags only. Storage account names no longer include it.
 export ORG_PREFIX="ishelar"                 # short, lowercase, no dashes
 
 # Management subscription: hosts ALL state storage accounts.
@@ -50,8 +51,11 @@ export STATE_RG="rg-terraform-state"
 export ENVIRONMENTS=("dev" "staging" "prod")
 
 # Storage account per environment, all inside SUB_MGMT.
-# Must be globally unique and 24 chars or fewer.
-sa_for_env() { echo "st${ORG_PREFIX}tfstate$1"; }
+# Storage account names share ONE GLOBAL namespace across all of Azure, so a
+# generic name can collide with another tenant and fail with
+# StorageAccountAlreadyTaken. The 001 suffix is the increment if that happens.
+# Rules: 3-24 chars, lowercase alphanumeric only, no dashes.
+sa_for_env() { echo "tfstate${1}001"; }
 
 # Container per stack. Container names: lowercase, dashes allowed.
 container_for_stack() { echo "tfstate-$1"; }

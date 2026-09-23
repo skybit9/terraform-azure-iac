@@ -8,12 +8,12 @@ infrastructure into governed, modular, pipeline-deployed Terraform.
 ```
 MANAGEMENT SUBSCRIPTION
 └── rg-terraform-state
-    ├── stishelartfstatedev
+    ├── tfstatedev001
     │   ├── tfstate-networking   -> terraform.tfstate
     │   ├── tfstate-keyvault     -> terraform.tfstate
     │   └── tfstate-app          -> terraform.tfstate
-    ├── stishelartfstatestaging  (same three containers)
-    └── stishelartfstateprod     (same three containers)
+    ├── tfstatestaging001  (same three containers)
+    └── tfstateprod001     (same three containers)
 ```
 
 **State lives outside the subscription it describes.** If a workload

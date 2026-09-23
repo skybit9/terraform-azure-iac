@@ -45,7 +45,7 @@ stages:
               steps:
                 - checkout: self
                 - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'dev', stack: 'networking', stateStorageAccount: 'stishelartfstatedev' }
+                  parameters: { environmentName: 'dev', stack: 'networking', stateStorageAccount: 'tfstatedev001' }
 
   - stage: DevKeyVault
     displayName: 'Dev: keyvault'
@@ -61,7 +61,7 @@ stages:
               steps:
                 - checkout: self
                 - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'dev', stack: 'keyvault', stateStorageAccount: 'stishelartfstatedev' }
+                  parameters: { environmentName: 'dev', stack: 'keyvault', stateStorageAccount: 'tfstatedev001' }
 
   - stage: DevApp
     displayName: 'Dev: app'
@@ -77,7 +77,7 @@ stages:
               steps:
                 - checkout: self
                 - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'dev', stack: 'app', stateStorageAccount: 'stishelartfstatedev' }
+                  parameters: { environmentName: 'dev', stack: 'app', stateStorageAccount: 'tfstatedev001' }
 
 # ── STAGING ───────────────────────────────────────────────────────────────────
   - stage: StagingNetworking
@@ -94,7 +94,7 @@ stages:
               steps:
                 - checkout: self
                 - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'staging', stack: 'networking', stateStorageAccount: 'stishelartfstatestaging' }
+                  parameters: { environmentName: 'staging', stack: 'networking', stateStorageAccount: 'tfstatestaging001' }
 
   - stage: StagingKeyVault
     displayName: 'Staging: keyvault'
@@ -110,7 +110,7 @@ stages:
               steps:
                 - checkout: self
                 - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'staging', stack: 'keyvault', stateStorageAccount: 'stishelartfstatestaging' }
+                  parameters: { environmentName: 'staging', stack: 'keyvault', stateStorageAccount: 'tfstatestaging001' }
 
   - stage: StagingApp
     displayName: 'Staging: app'
@@ -126,7 +126,7 @@ stages:
               steps:
                 - checkout: self
                 - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'staging', stack: 'app', stateStorageAccount: 'stishelartfstatestaging' }
+                  parameters: { environmentName: 'staging', stack: 'app', stateStorageAccount: 'tfstatestaging001' }
 
 # ── PRODUCTION ────────────────────────────────────────────────────────────────
 # terraform-prod Environment requires a senior approver. The applied-plan
@@ -145,7 +145,7 @@ stages:
               steps:
                 - checkout: self
                 - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'prod', stack: 'networking', stateStorageAccount: 'stishelartfstateprod' }
+                  parameters: { environmentName: 'prod', stack: 'networking', stateStorageAccount: 'tfstateprod001' }
 
   - stage: ProdKeyVault
     displayName: 'Prod: keyvault'
@@ -161,7 +161,7 @@ stages:
               steps:
                 - checkout: self
                 - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'prod', stack: 'keyvault', stateStorageAccount: 'stishelartfstateprod' }
+                  parameters: { environmentName: 'prod', stack: 'keyvault', stateStorageAccount: 'tfstateprod001' }
 
   - stage: ProdApp
     displayName: 'Prod: app'
@@ -177,4 +177,4 @@ stages:
               steps:
                 - checkout: self
                 - template: templates/apply-steps.yml
-                  parameters: { environmentName: 'prod', stack: 'app', stateStorageAccount: 'stishelartfstateprod' }
+                  parameters: { environmentName: 'prod', stack: 'app', stateStorageAccount: 'tfstateprod001' }

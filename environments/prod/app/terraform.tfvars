@@ -9,7 +9,7 @@ nsg_allowed_ssh_source = "10.30.0.0/16"
 
 # Upstream state lives in the management subscription
 state_resource_group  = "rg-terraform-state"
-state_storage_account = "stishelartfstateprod"
+state_storage_account = "tfstateprod001"
 
 tags = {
   environment = "production"

@@ -71,17 +71,17 @@ stages:
         pool: { vmImage: 'ubuntu-latest' }
         steps:
           - template: templates/plan-steps.yml
-            parameters: { environmentName: 'dev', stack: 'networking', stateStorageAccount: 'stishelartfstatedev' }
+            parameters: { environmentName: 'dev', stack: 'networking', stateStorageAccount: 'tfstatedev001' }
       - job: KeyVault
         pool: { vmImage: 'ubuntu-latest' }
         steps:
           - template: templates/plan-steps.yml
-            parameters: { environmentName: 'dev', stack: 'keyvault', stateStorageAccount: 'stishelartfstatedev' }
+            parameters: { environmentName: 'dev', stack: 'keyvault', stateStorageAccount: 'tfstatedev001' }
       - job: App
         pool: { vmImage: 'ubuntu-latest' }
         steps:
           - template: templates/plan-steps.yml
-            parameters: { environmentName: 'dev', stack: 'app', stateStorageAccount: 'stishelartfstatedev' }
+            parameters: { environmentName: 'dev', stack: 'app', stateStorageAccount: 'tfstatedev001' }
 
   - stage: PlanStaging
     displayName: 'Plan: Staging'
@@ -92,17 +92,17 @@ stages:
         pool: { vmImage: 'ubuntu-latest' }
         steps:
           - template: templates/plan-steps.yml
-            parameters: { environmentName: 'staging', stack: 'networking', stateStorageAccount: 'stishelartfstatestaging' }
+            parameters: { environmentName: 'staging', stack: 'networking', stateStorageAccount: 'tfstatestaging001' }
       - job: KeyVault
         pool: { vmImage: 'ubuntu-latest' }
         steps:
           - template: templates/plan-steps.yml
-            parameters: { environmentName: 'staging', stack: 'keyvault', stateStorageAccount: 'stishelartfstatestaging' }
+            parameters: { environmentName: 'staging', stack: 'keyvault', stateStorageAccount: 'tfstatestaging001' }
       - job: App
         pool: { vmImage: 'ubuntu-latest' }
         steps:
           - template: templates/plan-steps.yml
-            parameters: { environmentName: 'staging', stack: 'app', stateStorageAccount: 'stishelartfstatestaging' }
+            parameters: { environmentName: 'staging', stack: 'app', stateStorageAccount: 'tfstatestaging001' }
 
   - stage: PlanProd
     displayName: 'Plan: Production'
@@ -113,14 +113,14 @@ stages:
         pool: { vmImage: 'ubuntu-latest' }
         steps:
           - template: templates/plan-steps.yml
-            parameters: { environmentName: 'prod', stack: 'networking', stateStorageAccount: 'stishelartfstateprod' }
+            parameters: { environmentName: 'prod', stack: 'networking', stateStorageAccount: 'tfstateprod001' }
       - job: KeyVault
         pool: { vmImage: 'ubuntu-latest' }
         steps:
           - template: templates/plan-steps.yml
-            parameters: { environmentName: 'prod', stack: 'keyvault', stateStorageAccount: 'stishelartfstateprod' }
+            parameters: { environmentName: 'prod', stack: 'keyvault', stateStorageAccount: 'tfstateprod001' }
       - job: App
         pool: { vmImage: 'ubuntu-latest' }
         steps:
           - template: templates/plan-steps.yml
-            parameters: { environmentName: 'prod', stack: 'app', stateStorageAccount: 'stishelartfstateprod' }
+            parameters: { environmentName: 'prod', stack: 'app', stateStorageAccount: 'tfstateprod001' }
