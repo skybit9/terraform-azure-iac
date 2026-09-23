@@ -3,10 +3,11 @@
 # resource groups. ci-plan, cd-apply, and drift-detection all render from here.
 #
 # ADDING A RESOURCE GROUP TO AN ENVIRONMENT
-#   1. create environments/<env>/rg/<resource-group-name>/
+#   1. create environments/<env>/<resource-group-name>/
 #   2. add <resource-group-name> to that environment's workloads list below
 #   3. bootstrap: rerun 01-04 and create its 2 service connections
-# CI fails if this list and the rg/ folders disagree.
+# CI fails if this list and the workload folders disagree.
+# 'shared' is reserved: environments/<env>/shared/ holds networking and keyvault.
 #
 # Shared stacks (networking, keyvault) exist in every environment and are not
 # listed: they are fixed and always applied first.

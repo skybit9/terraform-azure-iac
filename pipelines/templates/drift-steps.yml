@@ -4,7 +4,7 @@
 parameters:
   - name: environmentName
     type: string
-  - name: stackPath        # shared/networking | shared/keyvault | rg/<resource-group>
+  - name: stackPath        # shared/networking | shared/keyvault | <resource-group>
     type: string
   - name: stackId          # networking | keyvault | lowercased RG name
     type: string

@@ -6,8 +6,9 @@
 # STACKS ARE DISCOVERED FROM FOLDERS
 #   environments/<env>/shared/networking   -> stack id: networking
 #   environments/<env>/shared/keyvault     -> stack id: keyvault
-#   environments/<env>/rg/<resource-group> -> stack id: lowercased RG name
-# Add a workload RG by creating its folder (and listing it in
+#   environments/<env>/<resource-group>    -> stack id: lowercased RG name
+#   (every folder under environments/<env>/ except shared/ is a workload RG)
+# Add a workload RG by creating environments/<env>/<rg-name>/ (and listing it in
 # pipelines/templates/environments.yml; CI checks the two match).
 #
 # STATE TOPOLOGY
@@ -63,11 +64,14 @@ sub_for_env() {
 
 lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
-# Workload RG names for an environment, straight from the folder names.
+# Workload RG names for an environment: every folder except shared/.
 workload_rgs() {                                          # <env>
-  local d
-  for d in "$REPO_ROOT/environments/$1/rg"/*/; do
-    [ -d "$d" ] && basename "$d"
+  local d name
+  for d in "$REPO_ROOT/environments/$1"/*/; do
+    [ -d "$d" ] || continue
+    name="$(basename "$d")"
+    [ "$name" = "shared" ] && continue
+    echo "$name"
   done
 }
 

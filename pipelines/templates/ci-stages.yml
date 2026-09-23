@@ -18,18 +18,23 @@ stages:
             displayName: 'Format check'
 
           - ${{ each env in parameters.environments }}:
-              # The workloads list in environments.yml must match the rg/
-              # folders exactly, and each folder's resource_group_name must
-              # equal the folder name.
+              # The workloads list in environments.yml must match the workload
+              # folders exactly (every folder under the environment except
+              # shared/), and each folder's resource_group_name must equal the
+              # folder name.
               - script: |
                   set -euo pipefail
-                  cd "$(Build.SourcesDirectory)/environments/${{ env.name }}/rg"
+                  cd "$(Build.SourcesDirectory)/environments/${{ env.name }}"
                   expected="$(echo '${{ join(' ', env.workloads) }}' | tr ' ' '\n' | sort)"
-                  actual="$(find . -mindepth 1 -maxdepth 1 -type d | sed 's|^\./||' | sort)"
+                  actual="$(find . -mindepth 1 -maxdepth 1 -type d ! -name shared | sed 's|^\./||' | sort)"
                   if [ "$expected" != "$actual" ]; then
-                    echo "##vso[task.logissue type=error]environments.yml workloads for ${{ env.name }} do not match rg/ folders"
+                    echo "##vso[task.logissue type=error]environments.yml workloads for ${{ env.name }} do not match the workload folders"
                     echo "config:";  echo "$expected"
                     echo "folders:"; echo "$actual"
+                    exit 1
+                  fi
+                  if echo "$expected" | grep -qx shared; then
+                    echo "##vso[task.logissue type=error]'shared' is reserved and cannot be a workload name"
                     exit 1
                   fi
                   for rg in $actual; do
@@ -65,8 +70,8 @@ stages:
                       set -euo pipefail
                       terraform init -backend=false -input=false
                       terraform validate
-                    displayName: 'Validate ${{ env.name }}/rg/${{ rg }}'
-                    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ env.name }}/rg/${{ rg }}'
+                    displayName: 'Validate ${{ env.name }}/${{ rg }}'
+                    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ env.name }}/${{ rg }}'
 
           # tflint downloads the azurerm ruleset from GitHub. Unauthenticated
           # works but is rate limited (60/hour per IP, hosted agents share IPs).
@@ -107,8 +112,8 @@ stages:
 
           - ${{ each rg in env.workloads }}:
               - job: wl_${{ replace(lower(rg), '-', '_') }}
-                displayName: 'rg/${{ rg }}'
+                displayName: '${{ rg }}'
                 pool: {vmImage: ubuntu-latest}
                 steps:
                   - template: plan-steps.yml
-                    parameters: {environmentName: '${{ env.name }}', stackPath: 'rg/${{ rg }}', stackId: '${{ lower(rg) }}'}
+                    parameters: {environmentName: '${{ env.name }}', stackPath: '${{ rg }}', stackId: '${{ lower(rg) }}'}

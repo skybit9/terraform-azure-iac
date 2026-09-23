@@ -36,7 +36,7 @@ stages:
 
           - ${{ each rg in env.workloads }}:
               - deployment: wl_${{ replace(lower(rg), '-', '_') }}
-                displayName: 'rg/${{ rg }}'
+                displayName: '${{ rg }}'
                 dependsOn: shared_keyvault
                 environment: 'terraform-${{ env.name }}'
                 pool: {vmImage: ubuntu-latest}
@@ -45,4 +45,4 @@ stages:
                     deploy:
                       steps:
                         - template: apply-steps.yml
-                          parameters: {environmentName: '${{ env.name }}', stackPath: 'rg/${{ rg }}', stackId: '${{ lower(rg) }}'}
+                          parameters: {environmentName: '${{ env.name }}', stackPath: '${{ rg }}', stackId: '${{ lower(rg) }}'}

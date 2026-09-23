@@ -61,7 +61,7 @@ state to read yet. This happens only the first time.
 
 | Value | Defined in | Must match |
 |---|---|---|
-| Workload RG list | `environments/<env>/rg/` folders (read by bootstrap) | `workloads` in `pipelines/templates/environments.yml`. **CI enforces** |
+| Workload RG list | folders under `environments/<env>/` except `shared/` (read by bootstrap) | `workloads` in `pipelines/templates/environments.yml`. **CI enforces** |
 | State storage account names `tfstate<env>001` | `sa_for_env()` in `bootstrap/00-variables.sh` | `pipelines/templates/*-steps.yml` and `state_storage_account` in every workload `terraform.tfvars` |
 | Service connection names | `04-federated-credentials.sh` prints them | Azure DevOps connection names |
 
@@ -76,8 +76,7 @@ environments/<env>/
 ├── shared/
 │   ├── networking/                     one VNet per environment
 │   └── keyvault/                       one Key Vault per environment
-└── rg/
-    └── <resource-group-name>/          one folder per workload RG; folder name = RG name
+└── <resource-group-name>/              one folder per workload RG; folder name = RG name
 pipelines/
 ├── ci-plan.yml | cd-apply.yml | drift-detection.yml
 └── templates/environments.yml          THE list of environments and workload RGs
@@ -109,7 +108,7 @@ MANAGEMENT SUBSCRIPTION
 |---|---|---|---|
 | shared | `shared/networking` | `rg-networking-<env>` | `tfstate-networking` |
 | shared | `shared/keyvault` | `rg-keyvault-<env>` | `tfstate-keyvault` |
-| workload | `rg/<rg-name>` | `<rg-name>` exactly | `tfstate-<lowercased rg-name>` |
+| workload | `<rg-name>` | `<rg-name>` exactly | `tfstate-<lowercased rg-name>` |
 
 **Networking and Key Vault are shared by every workload RG in an
 environment.** A new workload RG never gets its own VNet or vault; it reads the
@@ -121,7 +120,7 @@ until the shared stacks have been applied once; that is expected.
 
 ## Adding a workload resource group
 
-1. `mkdir environments/<env>/rg/<rg-name>` and copy `backend.tf`,
+1. `mkdir environments/<env>/<rg-name>` and copy `backend.tf`,
    `providers.tf`, `versions.tf` from an existing workload
 2. Write the Terraform (or import, below). `resource_group_name` in its
    `terraform.tfvars` must equal the folder name
@@ -131,7 +130,7 @@ until the shared stacks have been applied once; that is expected.
    `SVC-TF-<env>-<lowercased rg-name>-plan` and `-apply`
 5. PR, CI, merge, CD
 
-CI fails if step 3 is forgotten, if an extra entry has no folder, or if the
+`shared` is reserved and cannot be a workload name. CI fails if step 3 is forgotten, if an extra entry has no folder, or if the
 folder name and `resource_group_name` differ.
 
 Lowercased RG names must be 3 to 55 characters of `a-z`, `0-9`, and single
@@ -143,7 +142,7 @@ reject anything else.
 Same as above, with the code generated from Azure instead of written:
 
 ```bash
-cd environments/dev/rg/<existing-rg-name>
+cd environments/dev/<existing-rg-name>
 aztfexport resource-group <existing-rg-name> \
   --hcl-only --generate-import-block --non-interactive --output-dir ./export
 mv export/main.tf main.tf && mv export/import.tf import.tf && rm -rf export
@@ -161,7 +160,7 @@ import, so groups are only created when missing.
 
 ## Adding or removing a VM
 
-VMs are defined in `locals` in `environments/<env>/rg/rg-app-<env>/main.tf`:
+VMs are defined in `locals` in `environments/<env>/rg-app-<env>/main.tf`:
 
 ```hcl
 locals {

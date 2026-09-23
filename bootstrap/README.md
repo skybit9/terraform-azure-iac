@@ -4,7 +4,7 @@ Creates everything that must exist before the pipelines can run. Idempotent:
 every script is safe to re-run.
 
 **Stacks are discovered from folders**: `shared/networking`, `shared/keyvault`,
-and every `environments/<env>/rg/<rg-name>/`. After adding a workload RG
+and every other folder `environments/<env>/<rg-name>/`. After adding a workload RG
 folder, rerun `01` to `04` and create its two service connections.
 
 **Existing resource groups are never modified**: they are only created when

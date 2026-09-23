@@ -26,8 +26,8 @@ stages:
 
               - ${{ each rg in env.workloads }}:
                   - job: wl_${{ replace(lower(rg), '-', '_') }}
-                    displayName: 'rg/${{ rg }}'
+                    displayName: '${{ rg }}'
                     pool: {vmImage: ubuntu-latest}
                     steps:
                       - template: drift-steps.yml
-                        parameters: {environmentName: '${{ env.name }}', stackPath: 'rg/${{ rg }}', stackId: '${{ lower(rg) }}'}
+                        parameters: {environmentName: '${{ env.name }}', stackPath: '${{ rg }}', stackId: '${{ lower(rg) }}'}
