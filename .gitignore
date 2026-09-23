@@ -26,3 +26,6 @@ crash.*.log
 .vscode/
 .idea/
 .DS_Store
+
+# Bootstrap output: contains app IDs and SP object IDs
+bootstrap/identities.env

@@ -57,6 +57,28 @@ module "app_vm" {
 6. Wire into CI and CD, enable nightly drift detection
 7. Remove Contributor from humans so the pipeline is the only write path
 
+## Bootstrap
+
+Before either pipeline can run, Azure-side prerequisites must exist: the state
+storage account, service principals, RBAC, federated credentials, and resource
+provider registration. See `bootstrap/README.md` for the run order.
+
+```bash
+cd bootstrap
+source ./00-variables.sh   # edit values first
+./01-state-backend.sh
+./02-identities.sh
+source ./identities.env
+./03-rbac.sh
+# create the service connections in Azure DevOps, then:
+./04-federated-credentials.sh
+./05-providers.sh
+./99-verify.sh
+```
+
+Plan and apply use separate identities per environment. A plan needs Reader only,
+so the CI pipeline that runs on every pull request never holds write access.
+
 ## Security notes
 
 - State contains secrets in plaintext. Storage account uses encryption at rest,
