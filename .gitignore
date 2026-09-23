@@ -1,0 +1,28 @@
+# Terraform state: contains secrets in plaintext. Never commit.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Provider binaries and lock dir
+.terraform/
+.terraform.lock.hcl
+
+# Real variable values (commit only *.example)
+*.tfvars
+!*.tfvars.example
+
+# Saved plans
+*.tfplan
+*.binary
+plan-*.json
+plan-*.txt
+apply-*.txt
+
+# Crash logs
+crash.log
+crash.*.log
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store

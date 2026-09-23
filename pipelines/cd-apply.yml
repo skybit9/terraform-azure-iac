@@ -1,0 +1,103 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# CD PIPELINE — Apply (runs ONLY on merge to main)
+#
+# Key design decision: this pipeline RE-PLANS rather than reusing the PR's plan
+# binary. Reason: between the PR plan and the merge, another PR may have merged
+# and changed state. A stale plan applied blindly is worse than a fresh one
+# reviewed at the gate.
+#
+# The tradeoff is handled by branch policy: "Require branches to be up to date
+# before merging" means the PR plan and the merge plan are almost always
+# identical, and the approver sees the fresh plan at the gate before apply.
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: 'CD-Apply-$(Date:yyyyMMdd)$(Rev:.r)'
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - 'environments/**'
+      - 'modules/**'
+
+pr: none                                  # never run this on a PR
+
+variables:
+  TF_VERSION: '1.9.8'
+  BACKEND_RG: 'rg-terraform-state'
+  BACKEND_SA: 'stterraformstate'
+  BACKEND_CONTAINER: 'tfstate'
+  TF_IN_AUTOMATION: 'true'
+  TF_INPUT: 'false'
+
+stages:
+
+# ── DEV ───────────────────────────────────────────────────────────────────────
+  - stage: Dev
+    displayName: 'Apply: Dev'
+    jobs:
+      - deployment: ApplyDev
+        displayName: 'Apply Dev'
+        # The 'dev' Environment object in Azure DevOps holds the approval gate.
+        # Approvers are configured on the Environment, not in this YAML.
+        environment: 'terraform-dev'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - template: templates/apply-steps.yml
+                  parameters:
+                    environmentName: 'dev'
+                    serviceConnection: 'SVC-Terraform-Dev-Contributor'
+                    keyVaultName: 'kv-terraform-dev'
+
+# ── STAGING ───────────────────────────────────────────────────────────────────
+  - stage: Staging
+    displayName: 'Apply: Staging'
+    dependsOn: Dev
+    condition: succeeded()
+    jobs:
+      - deployment: ApplyStaging
+        displayName: 'Apply Staging'
+        environment: 'terraform-staging'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - template: templates/apply-steps.yml
+                  parameters:
+                    environmentName: 'staging'
+                    serviceConnection: 'SVC-Terraform-Staging-Contributor'
+                    keyVaultName: 'kv-terraform-staging'
+
+# ── PRODUCTION ────────────────────────────────────────────────────────────────
+  - stage: Prod
+    displayName: 'Apply: Production'
+    dependsOn: Staging
+    condition: succeeded()
+    jobs:
+      - deployment: ApplyProd
+        displayName: 'Apply Production'
+        # 'terraform-prod' Environment requires a senior approver.
+        # Plan artifact from this run is the CAB evidence package.
+        environment: 'terraform-prod'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - template: templates/apply-steps.yml
+                  parameters:
+                    environmentName: 'prod'
+                    serviceConnection: 'SVC-Terraform-Prod-Contributor'
+                    keyVaultName: 'kv-terraform-prod'

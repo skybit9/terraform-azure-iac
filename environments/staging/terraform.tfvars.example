@@ -1,0 +1,23 @@
+# ── PRODUCTION VAR FILE ───────────────────────────────────────────────────────
+# Passed to terraform plan/apply via -var-file=environments/prod.tfvars
+# Never store secrets here. Secrets come from Key Vault via pipeline at runtime.
+
+vm_name             = "vm-app-prod-001"
+resource_group_name = "rg-app-prod"
+location            = "canadacentral"
+vm_size             = "Standard_D4s_v3"
+admin_username      = "azureadmin"
+os_disk_size_gb     = 128
+os_disk_type        = "Premium_LRS"
+
+# subnet_id and key_vault_id passed as TF_VAR_ environment variables
+# from Key Vault in the pipeline so they are not hardcoded here
+
+nsg_allowed_ssh_source = "10.10.0.0/16"
+
+tags = {
+  environment  = "production"
+  cost-center  = "platform-engineering"
+  owner        = "cloud-team"
+  managed-by   = "terraform"
+}

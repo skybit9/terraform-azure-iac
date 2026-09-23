@@ -1,0 +1,99 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# REUSABLE TEMPLATE — plan steps for one environment
+# Called by ci-plan.yml once per environment so the logic lives in one place.
+# ══════════════════════════════════════════════════════════════════════════════
+
+parameters:
+  - name: environmentName
+    type: string
+  - name: serviceConnection
+    type: string
+  - name: keyVaultName
+    type: string
+
+steps:
+
+  - task: TerraformInstaller@1
+    displayName: 'Install Terraform'
+    inputs:
+      terraformVersion: $(TF_VERSION)
+
+  # Credentials pulled at runtime. Nothing stored in pipeline variables.
+  - task: AzureKeyVault@2
+    displayName: 'Pull ARM credentials (${{ parameters.environmentName }})'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      KeyVaultName: ${{ parameters.keyVaultName }}
+      SecretsFilter: 'ARM-CLIENT-ID,ARM-CLIENT-SECRET,ARM-TENANT-ID,ARM-SUBSCRIPTION-ID'
+      RunAsPreJob: true
+
+  - script: |
+      terraform init \
+        -backend-config="resource_group_name=$(BACKEND_RG)" \
+        -backend-config="storage_account_name=$(BACKEND_SA)" \
+        -backend-config="container_name=$(BACKEND_CONTAINER)" \
+        -backend-config="key=${{ parameters.environmentName }}.terraform.tfstate"
+    displayName: 'Init (${{ parameters.environmentName }} backend)'
+    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}'
+    env:
+      ARM_CLIENT_ID: $(ARM-CLIENT-ID)
+      ARM_CLIENT_SECRET: $(ARM-CLIENT-SECRET)
+      ARM_TENANT_ID: $(ARM-TENANT-ID)
+      ARM_SUBSCRIPTION_ID: $(ARM-SUBSCRIPTION-ID)
+
+  - script: |
+      # -lock=false is SAFE on plan and avoids blocking a concurrent apply.
+      # Never use -lock=false on apply.
+      terraform plan \
+        -lock=false \
+        -var-file=terraform.tfvars \
+        -out=plan-${{ parameters.environmentName }}.binary
+
+      terraform show -json plan-${{ parameters.environmentName }}.binary \
+        > plan-${{ parameters.environmentName }}.json
+
+      terraform show -no-color plan-${{ parameters.environmentName }}.binary \
+        > plan-${{ parameters.environmentName }}.txt
+    displayName: 'Plan (${{ parameters.environmentName }})'
+    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}'
+    env:
+      ARM_CLIENT_ID: $(ARM-CLIENT-ID)
+      ARM_CLIENT_SECRET: $(ARM-CLIENT-SECRET)
+      ARM_TENANT_ID: $(ARM-TENANT-ID)
+      ARM_SUBSCRIPTION_ID: $(ARM-SUBSCRIPTION-ID)
+
+  # Scan the RESOLVED plan, not raw HCL. Raw HCL misses values that only exist
+  # after variables, locals, and module outputs are evaluated.
+  - script: |
+      pip install checkov --quiet
+      checkov \
+        -f plan-${{ parameters.environmentName }}.json \
+        --framework terraform_plan \
+        --output cli \
+        --output junitxml \
+        --output-file-path console,checkov-${{ parameters.environmentName }}.xml \
+        --soft-fail-on MEDIUM,LOW \
+        --hard-fail-on HIGH,CRITICAL
+    displayName: 'Checkov scan of plan JSON (${{ parameters.environmentName }})'
+    workingDirectory: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}'
+
+  - task: PublishTestResults@2
+    displayName: 'Publish Checkov results'
+    condition: always()
+    inputs:
+      testResultsFormat: 'JUnit'
+      testResultsFiles: '**/checkov-${{ parameters.environmentName }}.xml'
+      testRunTitle: 'Checkov ${{ parameters.environmentName }}'
+
+  # The binary is what CD will apply. The JSON and TXT are for human review.
+  - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/plan-${{ parameters.environmentName }}.binary'
+    artifact: 'plan-${{ parameters.environmentName }}-binary'
+    displayName: 'Publish plan binary'
+
+  - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/plan-${{ parameters.environmentName }}.json'
+    artifact: 'plan-${{ parameters.environmentName }}-json'
+    displayName: 'Publish plan JSON'
+
+  - publish: '$(Build.SourcesDirectory)/environments/${{ parameters.environmentName }}/plan-${{ parameters.environmentName }}.txt'
+    artifact: 'plan-${{ parameters.environmentName }}-txt'
+    displayName: 'Publish human-readable plan'
