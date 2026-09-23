@@ -113,17 +113,23 @@ once; that is expected.
 
 ## Adding or removing a VM
 
-VMs are a map in `environments/<env>/app/terraform.tfvars`:
+VMs are defined in `locals` in `environments/<env>/app/main.tf`:
 
 ```hcl
-vms = {
-  "vm-app-dev-01" = { vm_size = "Standard_B2s", os_disk_size_gb = 64, os_disk_type = "StandardSSD_LRS" }
-  "vm-app-dev-02" = { vm_size = "Standard_B2s", os_disk_size_gb = 64, os_disk_type = "StandardSSD_LRS" }
+locals {
+  vms = {
+    "vm-app-dev-01" = { vm_size = "Standard_B2s", os_disk_size_gb = 64, os_disk_type = "StandardSSD_LRS" }
+    "vm-app-dev-02" = { vm_size = "Standard_B2s", os_disk_size_gb = 64, os_disk_type = "StandardSSD_LRS" }
+  }
 }
 ```
 
-The module is called once with `for_each`, keyed by VM name. Removing an entry
-destroys only that VM; the others are never in the plan.
+The module is called once with `for_each = local.vms`, keyed by VM name.
+Removing an entry destroys only that VM; the others are never in the plan.
+**Never rename a key**: Terraform treats it as destroy old, create new.
+
+Trade-off accepted: `locals` has no type checking, so a misspelled attribute
+surfaces as a module error at plan rather than a variable type error.
 
 ## Module versioning
 

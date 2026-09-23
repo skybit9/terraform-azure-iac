@@ -1,12 +1,3 @@
-variable "vms" {
-  type = map(object({
-    vm_size         = string
-    os_disk_size_gb = number
-    os_disk_type    = string
-  }))
-  description = "VMs to deploy, keyed by VM name."
-}
-
 variable "resource_group_name" {
   type        = string
   description = "Resource group for this stack."

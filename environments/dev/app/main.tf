@@ -26,11 +26,23 @@ data "terraform_remote_state" "keyvault" {
   }
 }
 
-# One module call, any number of VMs. Adding a VM is one entry in the vms map
-# in terraform.tfvars. Keyed by name, so removing one VM never disturbs another.
+# VMs in this stack, keyed by VM name. Add a VM: add one entry. Remove a VM:
+# delete its entry; only that VM is destroyed. Never rename a key: that
+# destroys the VM and creates a new one.
+locals {
+  vms = {
+    "vm-app-dev-01" = {
+      vm_size         = "Standard_B2s"
+      os_disk_size_gb = 64
+      os_disk_type    = "StandardSSD_LRS"
+    }
+  }
+}
+
+# One module call, one VM per entry in local.vms.
 module "vms" {
   source   = "git::https://github.com/skybit9/terraform-azure-iac.git//modules/linux-vm?ref=v1.0.0"
-  for_each = var.vms
+  for_each = local.vms
 
   vm_name             = each.key
   resource_group_name = var.resource_group_name
