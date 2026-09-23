@@ -49,14 +49,25 @@ stages:
                     displayName: 'Validate ${{ env }}/${{ stack }}'
                     workingDirectory: '$(Build.SourcesDirectory)/environments/${{ env }}/${{ stack }}'
 
+          # tflint downloads the azurerm ruleset from GitHub. Unauthenticated
+          # works but GitHub allows 60 requests/hour per IP, and hosted agents
+          # share IPs. Optional fix: add a secret pipeline variable named
+          # GITHUB_TOKEN (a GitHub PAT with no scopes). Not the Azure DevOps
+          # System.AccessToken: GitHub rejects that with 401.
           - script: |
               set -euo pipefail
+              # An undefined variable arrives as the literal text $(GITHUB_TOKEN);
+              # only export a real value, otherwise GitHub returns 401.
+              case "${GH_TOKEN_MAPPED:-}" in
+                ""|'$(GITHUB_TOKEN)') unset GITHUB_TOKEN; echo "tflint: unauthenticated GitHub access" ;;
+                *) export GITHUB_TOKEN="$GH_TOKEN_MAPPED"; echo "tflint: using GITHUB_TOKEN" ;;
+              esac
               curl -sSL https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
               tflint --init --config "$(Build.SourcesDirectory)/.tflint.hcl"
               tflint --recursive --config "$(Build.SourcesDirectory)/.tflint.hcl" --format compact
             displayName: 'TFLint'
             env:
-              GITHUB_TOKEN: $(System.AccessToken)
+              GH_TOKEN_MAPPED: $(GITHUB_TOKEN)
 
   # Plans are read only and each stack has its own state container, so every
   # environment and stack plans in parallel.

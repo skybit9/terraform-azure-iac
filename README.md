@@ -163,6 +163,10 @@ Every grant and its reason: `bootstrap/README.md`.
 | `cd-apply.yml` | merge to `main` | per environment: **one approval**, then networking, keyvault, app in order. Fresh plan inside the gate, then applies exactly that saved plan |
 | `drift-detection.yml` | nightly | read-only plan of prod stacks; exit code 2 fails the run |
 
+Optional: a secret pipeline variable `GITHUB_TOKEN` (GitHub PAT, no scopes)
+lifts GitHub's unauthenticated rate limit for the tflint ruleset download.
+Do not use `System.AccessToken` for this; it is an Azure DevOps token.
+
 CD re-plans rather than replaying the PR's plan artifact, so a PR merged in
 between cannot cause a stale plan to be applied. Branch policy requires the
 branch to be up to date with `main` before merge.
